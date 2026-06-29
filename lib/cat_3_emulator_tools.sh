@@ -156,6 +156,8 @@ em3_backup_individual() {
     timestamp=$(date '+%Y%m%d_%H%M%S')
     local dest="${EM_BACKUP_DIR}/${choice}_${timestamp}.tar.gz"
 
+    DIALOG_MSG "Backup Individual" "Criando backup de ${choice}...\n\nIsso pode levar alguns segundos dependendo do tamanho das configuracoes."
+
     if em3_backup_emulator "$choice" "$dest"; then
         chown ark:ark "$dest" 2>/dev/null || true
         local size
@@ -209,7 +211,28 @@ em3_backup_all() {
         done < <(em3_get_existing_dirs "$emu")
     done
 
-    if tar -czf "$dest" --ignore-failed-read "${all_dirs[@]}" 2>/dev/null; then
+    # Gauge simples — tar não produz progresso nativo, então mostramos
+    # uma barra indeterminada via mensagem enquanto o tar roda em background
+    (
+    tar -czf "$dest" --ignore-failed-read "${all_dirs[@]}" 2>/dev/null
+    echo "done" > "${EM_TMP_DIR}/backup_all_done"
+    ) &
+    local tar_pid=$!
+
+    local i=0
+    while kill -0 "$tar_pid" 2>/dev/null; do
+        i=$(( (i + 2) % 101 ))
+        echo "$i"
+        sleep 0.3
+    done | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Backup Geral" \
+        --gauge "Compactando configuracoes de ${#available[@]} emuladores...\nAguarde." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    wait "$tar_pid" 2>/dev/null
+    local tar_ret=$?
+
+    if [ "$tar_ret" -eq 0 ]; then
         chown ark:ark "$dest" 2>/dev/null || true
         local size
         size=$(em_human_size "$(stat -c%s "$dest" 2>/dev/null || echo 0)")
@@ -268,7 +291,29 @@ em3_import_config() {
         "Arquivo: ${choice}\nTamanho: ${fsize}\nArquivos contidos: ${total_files}\n\nPrimeiros arquivos:\n${contents}\n\nATENCAO: Os arquivos serao restaurados sobre as configuracoes atuais.\n\nDeseja continuar?")
     [ "$confirm" -ne 0 ] && return
 
-    if tar -xzf "$src" -C / 2>/dev/null; then
+    # Gauge indeterminado durante a extração
+    (
+    tar -xzf "$src" -C / 2>/dev/null
+    echo $? > "${EM_TMP_DIR}/import_ret"
+    ) &
+    local tar_pid=$!
+
+    local i=0
+    while kill -0 "$tar_pid" 2>/dev/null; do
+        i=$(( (i + 2) % 101 ))
+        echo "$i"
+        sleep 0.3
+    done | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Importar Config" \
+        --gauge "Restaurando arquivos de configuracao...\nAguarde." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    wait "$tar_pid" 2>/dev/null
+    local tar_ret
+    tar_ret=$(cat "${EM_TMP_DIR}/import_ret" 2>/dev/null || echo 1)
+    rm -f "${EM_TMP_DIR}/import_ret"
+
+    if [ "$tar_ret" -eq 0 ]; then
         DIALOG_MSG "Importar Config" \
             "Configuracao importada com sucesso.\n\nArquivo restaurado:\n${choice}\n\nReinicie os emuladores para aplicar as novas configuracoes."
     else
@@ -414,36 +459,55 @@ em3_export_to_usb() {
         "Backup: ${chosen_backup}\nDestino: ${chosen_mount}/\n\nDeseja copiar agora?")
     [ "$confirm" -ne 0 ] && return
 
-    # Copia para o pendrive
-    local copied=0
-    local errors=0
+    local copied_file="${EM_TMP_DIR}/usb_copied"
+    local errors_file="${EM_TMP_DIR}/usb_errors"
+    echo 0 > "$copied_file"; echo 0 > "$errors_file"
+    em_drain_tty_buffer
 
+    local total_to_copy
+    if [ "$chosen_backup" == "TODOS" ]; then
+        total_to_copy="${#backup_files[@]}"
+    else
+        total_to_copy=1
+    fi
+
+    (
+    local copied=0 errors=0 processed=0
     if [ "$chosen_backup" == "TODOS" ]; then
         for f in "${backup_files[@]}"; do
-            local fname
-            fname=$(basename "$f")
+            ((processed++))
+            echo $(( processed * 100 / total_to_copy ))
+            local fname; fname=$(basename "$f")
             if cp "$f" "${chosen_mount}/${fname}" 2>/dev/null; then
-                ((copied++))
+                ((copied++)); echo "$copied" > "$copied_file"
             else
-                ((errors++))
+                ((errors++)); echo "$errors" > "$errors_file"
             fi
         done
     else
+        echo "50"
         if cp "${EM_BACKUP_DIR}/${chosen_backup}" "${chosen_mount}/${chosen_backup}" 2>/dev/null; then
-            ((copied++))
+            echo 1 > "$copied_file"
         else
-            ((errors++))
+            echo 1 > "$errors_file"
         fi
+        echo "100"
     fi
-
-    # Sync para garantir que os dados foram gravados no pendrive
     sync 2>/dev/null
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Exportar para Pendrive" \
+        --gauge "Copiando para ${chosen_mount}/..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    local copied errors
+    copied=$(cat "$copied_file" 2>/dev/null || echo 0)
+    errors=$(cat "$errors_file" 2>/dev/null || echo 0)
+    rm -f "$copied_file" "$errors_file"
 
     local result_msg="Exportacao concluida.\n\nArquivos copiados: ${copied}"
     [ "$errors" -gt 0 ] && result_msg+="\nErros: ${errors}"
     result_msg+="\n\nDestino: ${chosen_mount}/"
     result_msg+="\n\nPode remover o pendrive com segurança."
-
     DIALOG_MSG "Exportar para Pendrive" "$result_msg"
 }
 
