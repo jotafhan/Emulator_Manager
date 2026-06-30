@@ -9,6 +9,26 @@
 #   lib/core.sh                        <- funcoes compartilhadas (dialog, NORM_RET, etc)
 #   lib/cat_1_rom_management.sh        <- Modulo 1: Gerenciamento de ROMs
 #   lib/cat_2_advanced_organization.sh <- Modulo 2: Organizacao Avancada
+#   lib/cat_3_emulator_tools.sh        <- Modulo 3: Backup Inteligente
+#   lib/cat_4_collection_manager.sh    <- Modulo 4: Gestao da Colecao
+#   lib/cat_5_update_manager.sh        <- Modulo 6 (menu): Atualizar Emulator Manager
+#   lib/keys_emulator_manager.gptk     <- Mapeamento de botoes (B = ESC) para qualquer device
+#
+# Modulos do menu principal:
+#   1. Gerenciamento de ROMs       (scan, integridade, renomear via .dat,
+#                                    compactar/descompactar, duplicadas,
+#                                    tamanho por sistema, estatisticas)
+#   2. Organizacao Avancada        (regiao, BIOS, beta/proto/demo, 1G1R,
+#                                    hacks/traducoes, limpar tags, title case,
+#                                    exportar/comparar listas, manutencao)
+#   3. Backup Inteligente          (backup/importar/apagar config de
+#                                    emuladores, exportar pendrive, restaurar
+#                                    padroes)
+#   4. Gestao da Colecao           (backup/restaurar saves e BIOS, exportar
+#                                    colecao para pendrive, sincronizar)
+#   5. Ferramentas de Performance  (em breve)
+#   6. Atualizar Emulator Manager  (verificar/aplicar atualizacoes via GitHub,
+#                                    restaurar versao anterior)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -33,6 +53,8 @@ source "${LIB_DIR}/core.sh"
 source "${LIB_DIR}/cat_1_rom_management.sh"
 source "${LIB_DIR}/cat_2_advanced_organization.sh"
 source "${LIB_DIR}/cat_3_emulator_tools.sh"
+source "${LIB_DIR}/cat_4_collection_manager.sh"
+source "${LIB_DIR}/cat_5_update_manager.sh"
 
 # -----------------------------------------------------------------------------
 # Limpa o TTY visivel antes de comecar. Mesmo padrao do Alter_MThemes: o
@@ -86,8 +108,9 @@ main_menu() {
             "1" "Gerenciamento de ROMs" \
             "2" "Organizacao Avancada" \
             "3" "Backup Inteligente" \
-            "4" "Ferramentas de Performance (em breve)" \
-            "5" "Ferramentas para Emuladores (em breve)" \
+            "4" "Gestao da Colecao" \
+            "5" "Ferramentas de Performance (em breve)" \
+            "6" "Atualizar Emulator Manager" \
             "0" "SAIR")
 
         local ret=$?
@@ -101,8 +124,9 @@ main_menu() {
             1) categoria_1 ;;
             2) categoria_2 ;;
             3) categoria_3 ;;
-            4) DIALOG_MSG "Ferramentas de Performance" "Modulo ainda nao implementado." ;;
-            5) DIALOG_MSG "Ferramentas para Emuladores" "Modulo ainda nao implementado." ;;
+            4) categoria_4 ;;
+            5) DIALOG_MSG "Ferramentas de Performance" "Modulo ainda nao implementado." ;;
+            6) categoria_5 ;;
             0)
                 pkill -f "gptokeyb -1 $SCRIPT_NAME" 2>/dev/null || true
                 printf '\033c' > "$CURR_TTY" 2>/dev/null || true
