@@ -12,6 +12,7 @@
 #   lib/cat_3_emulator_tools.sh        <- Modulo 3: Backup Inteligente
 #   lib/cat_4_collection_manager.sh    <- Modulo 4: Gestao da Colecao
 #   lib/cat_5_update_manager.sh        <- Modulo 6 (menu): Atualizar Emulator Manager
+#   lib/cat_6_performance_tools.sh     <- Modulo 5 (menu): Ferramentas de Performance
 #   lib/keys_emulator_manager.gptk     <- Mapeamento de botoes (B = ESC) para qualquer device
 #
 # Modulos do menu principal:
@@ -26,7 +27,9 @@
 #                                    padroes)
 #   4. Gestao da Colecao           (backup/restaurar saves e BIOS, exportar
 #                                    colecao para pendrive, sincronizar)
-#   5. Ferramentas de Performance  (em breve)
+#   5. Ferramentas de Performance  (nucleo por sistema, ajustar configs,
+#                                    perfil de energia, cache de shaders,
+#                                    restaurar originais)
 #   6. Atualizar Emulator Manager  (verificar/aplicar atualizacoes via GitHub,
 #                                    restaurar versao anterior)
 # =============================================================================
@@ -55,6 +58,7 @@ source "${LIB_DIR}/cat_2_advanced_organization.sh"
 source "${LIB_DIR}/cat_3_emulator_tools.sh"
 source "${LIB_DIR}/cat_4_collection_manager.sh"
 source "${LIB_DIR}/cat_5_update_manager.sh"
+source "${LIB_DIR}/cat_6_performance_tools.sh"
 
 # -----------------------------------------------------------------------------
 # Limpa o TTY visivel antes de comecar. Mesmo padrao do Alter_MThemes: o
@@ -104,12 +108,18 @@ fi
 main_menu() {
     while true; do
         local choice
-        choice=$(DIALOG_MENU "Emulator Manager v${EM_VERSION}" "Selecione um modulo:" \
+        # Lê a última modificação para exibir no topo do menu
+        local last_change
+        last_change=$(em_read_last_change)
+        local menu_text="Selecione um modulo:"
+        [ -n "$last_change" ] && menu_text="Ultima modificacao:\n${last_change}\n\nSelecione um modulo:"
+
+        choice=$(DIALOG_MENU "Emulator Manager v${EM_VERSION}" "$menu_text" \
             "1" "Gerenciamento de ROMs" \
             "2" "Organizacao Avancada" \
             "3" "Backup Inteligente" \
             "4" "Gestao da Colecao" \
-            "5" "Ferramentas de Performance (em breve)" \
+            "5" "Ferramentas de Performance" \
             "6" "Atualizar Emulator Manager" \
             "0" "SAIR")
 
@@ -125,7 +135,7 @@ main_menu() {
             2) categoria_2 ;;
             3) categoria_3 ;;
             4) categoria_4 ;;
-            5) DIALOG_MSG "Ferramentas de Performance" "Modulo ainda nao implementado." ;;
+            5) categoria_6 ;;
             6) categoria_5 ;;
             0)
                 pkill -f "gptokeyb -1 $SCRIPT_NAME" 2>/dev/null || true
