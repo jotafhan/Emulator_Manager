@@ -25,7 +25,15 @@ RENAME_REPORT="${EM_DATA_DIR}/rename_report.txt"
 EM_DATS_DIR="${EM_DATA_DIR}/dats"
 
 # --- Versão ---
-EM_VERSION="0.1.0-v1"
+# Regra de versionamento:
+#   Alteracao em opcao existente  → +0.0.1
+#   Nova opcao dentro de modulo   → +0.1.0
+#   Novo modulo                   → versao = numero de modulos (ex: 7 modulos = 7.0.0)
+EM_VERSION="6.0.0"
+
+# --- Arquivo de registro de última modificação ---
+# Formato: DATA HORA|MODULO|DESCRICAO
+EM_LAST_CHANGE_FILE="${EM_DATA_DIR}/last_change.txt"
 
 # --- Sistemas conhecidos (pastas dentro de /roms) ---
 # Lista usada para varrer e gerar estatísticas. Pode ser expandida.
@@ -71,6 +79,29 @@ em_init_dirs() {
     mkdir -p "$EM_DATA_DIR" "$EM_LOG_DIR" "$EM_TMP_DIR" "$EM_DATS_DIR"
     chown -R ark:ark "$EM_DATA_DIR" "$EM_LOG_DIR" "$EM_TMP_DIR" "$EM_DATS_DIR" 2>/dev/null || true
     chmod -R 755 "$EM_DATA_DIR" "$EM_LOG_DIR" "$EM_TMP_DIR" "$EM_DATS_DIR" 2>/dev/null || true
+}
+
+# --- Registra a última modificação feita pelo usuário ---
+# Uso: em_register_change "Modulo 3 - Backup Inteligente" "Exportar para pendrive"
+em_register_change() {
+    local modulo="$1"
+    local descricao="$2"
+    local timestamp
+    timestamp=$(date '+%d/%m/%Y %H:%M')
+    echo "${timestamp}|${modulo}|${descricao}" > "$EM_LAST_CHANGE_FILE"
+    chown ark:ark "$EM_LAST_CHANGE_FILE" 2>/dev/null || true
+}
+
+# --- Lê a última modificação registrada ---
+# Retorna string formatada ou vazio se não houver registro
+em_read_last_change() {
+    [ -f "$EM_LAST_CHANGE_FILE" ] || return
+    local line
+    line=$(cat "$EM_LAST_CHANGE_FILE" 2>/dev/null)
+    [ -z "$line" ] && return
+    local ts modulo descricao
+    IFS='|' read -r ts modulo descricao <<< "$line"
+    echo "${ts} — ${modulo}"
 }
 
 em_init_dirs
