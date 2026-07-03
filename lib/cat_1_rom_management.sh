@@ -320,12 +320,84 @@ em_rename_database() {
     mkdir -p "$dats_dir"
     chown ark:ark "$dats_dir" 2>/dev/null || true
 
-    # Detecta .dat automaticamente pelo nome do sistema
+    # Mapa de palavras-chave EXCLUSIVAS por sistema para detecção do .dat.
+    # Usa termos que aparecem nos nomes reais dos arquivos No-Intro/Redump
+    # e que NÃO se sobrepõem entre sistemas (ex: "game_boy_advance" é exclusivo
+    # de gba e não bate em "game_boy" do gb).
+    declare -A EM_DAT_KEYWORDS
+    EM_DAT_KEYWORDS["gba"]="game_boy_advance|game boy advance"
+    EM_DAT_KEYWORDS["gb"]="game_boy_color|game boy color|game_boy_colour|game boy colour"  # gbc first
+    EM_DAT_KEYWORDS["gbc"]="game_boy_color|game boy color|game_boy_colour|game boy colour"
+    EM_DAT_KEYWORDS["nes"]="nintendo_entertainment_system|nintendo entertainment system"
+    EM_DAT_KEYWORDS["snes"]="super_nintendo|super nintendo"
+    EM_DAT_KEYWORDS["n64"]="nintendo_64|nintendo 64"
+    EM_DAT_KEYWORDS["nds"]="nintendo_ds|nintendo ds"
+    EM_DAT_KEYWORDS["psx"]="playstation(?!.*2)|sony.*playstation(?!.*2)"
+    EM_DAT_KEYWORDS["ps2"]="playstation_2|playstation 2"
+    EM_DAT_KEYWORDS["psp"]="playstation_portable|playstation portable"
+    EM_DAT_KEYWORDS["megadrive"]="mega_drive|mega drive|genesis"
+    EM_DAT_KEYWORDS["mastersystem"]="master_system|master system|mark_iii|mark iii"
+    EM_DAT_KEYWORDS["gamegear"]="game_gear|game gear"
+    EM_DAT_KEYWORDS["sega32x"]="32x|sega_32x|sega 32x"
+    EM_DAT_KEYWORDS["segacd"]="mega.cd|sega.cd|mega-cd|sega-cd"
+    EM_DAT_KEYWORDS["saturn"]="saturn"
+    EM_DAT_KEYWORDS["dreamcast"]="dreamcast"
+    EM_DAT_KEYWORDS["neogeo"]="neo.geo|neo geo"
+    EM_DAT_KEYWORDS["atari2600"]="atari.*2600|2600"
+    EM_DAT_KEYWORDS["atarilynx"]="atari.*lynx|lynx"
+
+    # Função de correspondência: usa palavras-chave do mapa acima
+    em_dat_matches_system() {
+        local fname_lower="$1"   # nome do arquivo em lowercase
+        local sys="$2"
+
+        # 1. Correspondência exata: arquivo se chama exatamente "<sys>.dat"
+        local base="${fname_lower%.dat}"
+        [ "$base" = "$sys" ] && return 0
+
+        # 2. Casos especiais com sobreposição de nome
+        case "$sys" in
+            gb)
+                # Deve conter "game_boy" ou "game boy" MAS não "advance", "color" ou "colour"
+                echo "$fname_lower" | grep -qiE "game.boy" || return 1
+                echo "$fname_lower" | grep -qiE "advance|color|colour" && return 1
+                return 0
+                ;;
+            gbc)
+                echo "$fname_lower" | grep -qiE "game.boy.col" && return 0
+                return 1
+                ;;
+            gba)
+                echo "$fname_lower" | grep -qiE "game.boy.adv" && return 0
+                return 1
+                ;;
+            nes)
+                # "nintendo entertainment system" sem "super" antes
+                echo "$fname_lower" | grep -qiE "nintendo.entertainment" || return 1
+                echo "$fname_lower" | grep -qiE "super" && return 1
+                return 0
+                ;;
+            snes)
+                echo "$fname_lower" | grep -qiE "super.nintendo" && return 0
+                return 1
+                ;;
+            *)
+                # Para os outros sistemas usa palavras-chave do mapa
+                local keywords="${EM_DAT_KEYWORDS[$sys]:-}"
+                if [ -n "$keywords" ]; then
+                    echo "$fname_lower" | grep -qiE "$keywords" && return 0
+                fi
+                ;;
+        esac
+
+        return 1
+    }
+
     local auto_dat=""
     while IFS= read -r -d '' candidate; do
         local fname_lower
         fname_lower="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$fname_lower" == *"${chosen_sys}"* ]]; then
+        if em_dat_matches_system "$fname_lower" "$chosen_sys"; then
             auto_dat="$candidate"
             break
         fi
@@ -333,28 +405,23 @@ em_rename_database() {
 
     local dat_file=""
     if [ -n "$auto_dat" ]; then
+        # .dat encontrado — pergunta se quer usar
         local confirm
         confirm=$(DIALOG_YESNO "Arquivo .dat encontrado" \
             "Arquivo .dat encontrado:\n\n$(basename "$auto_dat")\n\nUsar este arquivo?")
-        [ "$confirm" -eq 0 ] && dat_file="$auto_dat"
-    fi
-
-    if [ -z "$dat_file" ]; then
-        DIALOG_MSG "Arquivo .dat" \
-            "Coloque o arquivo .dat No-Intro em:\n\n  ${dats_dir}/\n\nO nome deve conter o sistema (ex: 'gba').\nExemplo: Nintendo_-_Game_Boy_Advance.dat"
-        while IFS= read -r -d '' candidate; do
-            local fname_lower
-            fname_lower="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
-            if [[ "$fname_lower" == *"${chosen_sys}"* ]]; then
-                dat_file="$candidate"
-                break
-            fi
-        done < <(find "$dats_dir" -maxdepth 1 -name "*.dat" -print0 2>/dev/null)
-
-        if [ -z "$dat_file" ]; then
-            DIALOG_MSG "Renomear ROMs" "Nenhum .dat encontrado para '${chosen_sys}'.\nNenhuma alteracao foi feita."
+        if [ "$confirm" -eq 0 ]; then
+            # SIM — usa o arquivo detectado
+            dat_file="$auto_dat"
+        else
+            # NAO — usuário recusou, cancela sem tentar de novo
+            DIALOG_MSG "Renomear ROMs" "Operacao cancelada.\nNenhuma alteracao foi feita."
             return
         fi
+    else
+        # Nenhum .dat encontrado — informa onde colocar e encerra
+        DIALOG_MSG "Arquivo .dat nao encontrado" \
+            "Nenhum arquivo .dat encontrado para '${chosen_sys}'.\n\nColoque o arquivo .dat No-Intro na pasta:\n\n  ${dats_dir}/\n\nConsulte o arquivo dat_reference.md para saber o nome correto de cada sistema."
+        return
     fi
 
     # Constrói ou reutiliza o índice CRC32->nome
