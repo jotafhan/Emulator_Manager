@@ -906,7 +906,213 @@ em4_sync_roms() {
 }
 
 # =============================================================================
-# MENU PRINCIPAL DO MÓDULO 4
+# 7. INSTALAR BIOS DO PENDRIVE
+# Detecta arquivos de BIOS no pendrive, verifica MD5, renomeia para o nome
+# correto e copia para /roms/bios/
+# =============================================================================
+
+# Mapa de BIOS conhecidas: MD5 → "nome_correto|sistema|obrigatoria"
+# Fontes: Libretro docs, EmulationGeneralWiki, RetroArch system/ requirements
+declare -A EM4_BIOS_DB
+# --- PlayStation 1 ---
+EM4_BIOS_DB["8dd7d5296a650fac7319bce665a6a53c"]="scph5500.bin|PSX (BIOS Japao)|obrigatoria"
+EM4_BIOS_DB["490f666e1afb15b7362b406ed1cea246"]="scph5501.bin|PSX (BIOS EUA)|obrigatoria"
+EM4_BIOS_DB["32736f17079d0b2b7024407c39bd3050"]="scph5502.bin|PSX (BIOS Europa)|obrigatoria"
+EM4_BIOS_DB["8dd7d5296a650fac7319bce665a6a53c"]="scph1001.bin|PSX (BIOS EUA v2)|opcional"
+# --- PlayStation 2 ---
+EM4_BIOS_DB["bdc585c61f4a4be14acb3ce61dbe9954"]="SCPH-70012.bin|PS2 (BIOS EUA)|obrigatoria"
+# --- Game Boy Advance ---
+EM4_BIOS_DB["a860e8c0b6d573d191e4ec7db1b1e4f6"]="gba_bios.bin|GBA|opcional"
+# --- Nintendo DS ---
+EM4_BIOS_DB["a392174eb3e572fed6447e956bde4b25"]="bios7.bin|NDS (ARM7)|obrigatoria"
+EM4_BIOS_DB["1280f0d3a0e328e25f3a27e4b75d37b9"]="bios9.bin|NDS (ARM9)|obrigatoria"
+EM4_BIOS_DB["145eaef5bd3037cbc247c213bb3da1b3"]="firmware.bin|NDS (Firmware)|obrigatoria"
+# --- Sega CD ---
+EM4_BIOS_DB["e66fa1dc5820d254611fdcdba0662372"]="bios_CD_E.bin|Sega CD (Europa)|obrigatoria"
+EM4_BIOS_DB["854b9150240a198070150e4566ae1220"]="bios_CD_J.bin|Sega CD (Japao)|obrigatoria"
+EM4_BIOS_DB["2efd74e3232ff260e371b99f84024f7f"]="bios_CD_U.bin|Sega CD (EUA)|obrigatoria"
+# --- Sega Saturn ---
+EM4_BIOS_DB["af5828fdff51384f99b3c4926be27762"]="sega_101.bin|Saturn (Japao v1.01)|obrigatoria"
+EM4_BIOS_DB["3240872c70984b6cbfda1586cab68dbe"]="mpr-17933.bin|Saturn (Japao v1.00)|obrigatoria"
+# --- Dreamcast ---
+EM4_BIOS_DB["e10c53c2f8b90bab96ead2d368858623"]="dc_boot.bin|Dreamcast (BIOS)|obrigatoria"
+EM4_BIOS_DB["0a93f7940c455905bea479ec6e3721eb"]="dc_flash.bin|Dreamcast (Flash)|obrigatoria"
+# --- Atari Lynx ---
+EM4_BIOS_DB["fcd403db69f54290b51035d82f835e7b"]="lynxboot.img|Atari Lynx|obrigatoria"
+# --- Neo Geo ---
+EM4_BIOS_DB["dff6d41d4b4f7614074c42c4e5c6c0f9"]="neogeo.zip|Neo Geo|obrigatoria"
+# --- Famicom Disk System ---
+EM4_BIOS_DB["ca30b50f880eb660a320674ed365ef7a"]="disksys.rom|FDS (Famicom Disk)|obrigatoria"
+# --- PC Engine / TurboGrafx ---
+EM4_BIOS_DB["ff1a674273fe3540ccef576376407d1d"]="syscard3.pce|PC Engine CD|obrigatoria"
+
+em4_install_bios_from_usb() {
+    # Detecta pendrives
+    local mounts=()
+    mapfile -t mounts < <(em4_find_usb_mounts | sort -u)
+
+    if [ "${#mounts[@]}" -eq 0 ]; then
+        DIALOG_MSG "Instalar BIOS" \
+            "Nenhum pendrive detectado.\n\nConecte o pendrive com os arquivos de BIOS e tente novamente.\n\nOrganize os arquivos de BIOS em qualquer pasta do pendrive — o script vai varrer tudo automaticamente."
+        return
+    fi
+
+    # Escolhe o pendrive
+    local usb_menu=()
+    local mount
+    for mount in "${mounts[@]}"; do
+        local free; free=$(df -h "$mount" 2>/dev/null | tail -1 | awk '{print $4}')
+        usb_menu+=("$mount" "${mount}  (livre: ${free:-?})")
+    done
+
+    local chosen_mount
+    chosen_mount=$(DIALOG_MENU "Instalar BIOS" \
+        "Escolha o pendrive que contem os arquivos de BIOS:" "${usb_menu[@]}")
+    [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+    DIALOG_MSG "Instalar BIOS" "Varrendo o pendrive em busca de arquivos de BIOS...\n\nIsso pode levar alguns segundos."
+
+    # Varre todo o pendrive buscando arquivos que possam ser BIOS
+    local candidate_files=()
+    local f
+    while IFS= read -r -d '' f; do
+        candidate_files+=("$f")
+    done < <(find "$chosen_mount" -type f -print0 2>/dev/null)
+
+    local total="${#candidate_files[@]}"
+    if [ "$total" -eq 0 ]; then
+        DIALOG_MSG "Instalar BIOS" "Nenhum arquivo encontrado no pendrive."
+        return
+    fi
+
+    # Calcula MD5 de cada arquivo e cruza com o banco de dados
+    local found_file="${EM_TMP_DIR}/bios_found.tsv"   # md5 TAB caminho_origem TAB nome_destino TAB sistema TAB tipo
+    > "$found_file"
+    local checked_file="${EM_TMP_DIR}/bios_checked"
+    echo 0 > "$checked_file"
+    em_drain_tty_buffer
+
+    (
+    local processed=0
+    for f in "${candidate_files[@]}"; do
+        ((processed++))
+        echo $(( processed * 100 / total ))
+        echo "$processed" > "$checked_file"
+        local md5
+        md5=$(md5sum "$f" 2>/dev/null | cut -d' ' -f1)
+        [ -z "$md5" ] && continue
+        local entry="${EM4_BIOS_DB[$md5]:-}"
+        [ -z "$entry" ] && continue
+        local dest_name sistema tipo
+        IFS='|' read -r dest_name sistema tipo <<< "$entry"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$md5" "$f" "$dest_name" "$sistema" "$tipo" >> "$found_file"
+    done
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Instalar BIOS" \
+        --gauge "Verificando arquivos no pendrive via MD5..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    local checked
+    checked=$(cat "$checked_file" 2>/dev/null || echo 0)
+    rm -f "$checked_file"
+
+    local found_count=0
+    [ -s "$found_file" ] && found_count=$(wc -l < "$found_file")
+
+    if [ "$found_count" -eq 0 ]; then
+        DIALOG_MSG "Instalar BIOS" \
+            "Nenhuma BIOS reconhecida encontrada no pendrive.\n\nArquivos verificados: ${checked}\n\nVerifique se os arquivos de BIOS sao os corretos.\nO script verifica pelo MD5 (hash), nao pelo nome do arquivo."
+        rm -f "$found_file"
+        return
+    fi
+
+    # Monta prévia do que será instalado
+    local preview=""
+    local already=0
+    local new_count=0
+    while IFS=$'\t' read -r md5 src dest_name sistema tipo; do
+        local dest_path="${BIOS_DIR}/${dest_name}"
+        if [ -f "$dest_path" ]; then
+            preview+="[JA EXISTE] ${dest_name} (${sistema})\n"
+            ((already++))
+        else
+            preview+="[NOVO] ${dest_name} (${sistema}) — ${tipo}\n"
+            ((new_count++))
+        fi
+    done < "$found_file"
+
+    local confirm
+    confirm=$(DIALOG_YESNO "Instalar BIOS" \
+        "BIOS reconhecidas no pendrive: ${found_count}\n\nNovas: ${new_count}\nJa instaladas: ${already}\n\n${preview}\nOs arquivos serao copiados para:\n  ${BIOS_DIR}/\n\nDeseja instalar?")
+    if [ "$confirm" -ne 0 ]; then
+        DIALOG_MSG "Instalar BIOS" "Operacao cancelada.\nNenhum arquivo foi copiado."
+        rm -f "$found_file"
+        return
+    fi
+
+    # Copia e renomeia para o nome correto
+    mkdir -p "$BIOS_DIR"
+    chown ark:ark "$BIOS_DIR" 2>/dev/null || true
+
+    local installed=0
+    local skipped=0
+    local errors=0
+    local total_to_install
+    total_to_install=$(wc -l < "$found_file")
+    local processed=0
+    em_drain_tty_buffer
+
+    (
+    local processed=0
+    while IFS=$'\t' read -r md5 src dest_name sistema tipo; do
+        ((processed++))
+        echo $(( processed * 100 / total_to_install ))
+        local dest_path="${BIOS_DIR}/${dest_name}"
+        if [ -f "$dest_path" ]; then
+            # Verifica se a existente é idêntica
+            local existing_md5
+            existing_md5=$(md5sum "$dest_path" 2>/dev/null | cut -d' ' -f1)
+            if [ "$existing_md5" = "$md5" ]; then
+                echo "skip" >> "${EM_TMP_DIR}/bios_skip"
+            else
+                # Substitui se for diferente (versão errada)
+                if cp "$src" "$dest_path" 2>/dev/null; then
+                    chown ark:ark "$dest_path" 2>/dev/null || true
+                    echo "ok" >> "${EM_TMP_DIR}/bios_ok"
+                else
+                    echo "err" >> "${EM_TMP_DIR}/bios_err"
+                fi
+            fi
+        else
+            if cp "$src" "$dest_path" 2>/dev/null; then
+                chown ark:ark "$dest_path" 2>/dev/null || true
+                echo "ok" >> "${EM_TMP_DIR}/bios_ok"
+            else
+                echo "err" >> "${EM_TMP_DIR}/bios_err"
+            fi
+        fi
+    done < "$found_file"
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Instalar BIOS" \
+        --gauge "Instalando arquivos de BIOS..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    installed=$(grep -c "ok"   "${EM_TMP_DIR}/bios_ok"   2>/dev/null || echo 0)
+    skipped=$(grep -c  "skip"  "${EM_TMP_DIR}/bios_skip" 2>/dev/null || echo 0)
+    errors=$(grep -c   "err"   "${EM_TMP_DIR}/bios_err"  2>/dev/null || echo 0)
+    rm -f "$found_file" "${EM_TMP_DIR}/bios_ok" "${EM_TMP_DIR}/bios_skip" "${EM_TMP_DIR}/bios_err"
+
+    local result="Instalacao concluida.\n\n"
+    result+="BIOS instaladas/atualizadas: ${installed}\n"
+    result+="Ja estavam corretas (ignoradas): ${skipped}\n"
+    [ "$errors" -gt 0 ] && result+="Erros: ${errors}\n"
+    result+="\nDestino: ${BIOS_DIR}/"
+
+    DIALOG_MSG "Instalar BIOS" "$result"
+}
+
+# =============================================================================
+# MENU PRINCIPAL DO MÓDULO 4 (atualizado)
 # =============================================================================
 categoria_4() {
     while true; do
@@ -918,6 +1124,7 @@ categoria_4() {
             "4" "Restaurar BIOS" \
             "5" "Exportar Colecao para Pendrive" \
             "6" "Sincronizar com Pendrive" \
+            "7" "Instalar BIOS do Pendrive" \
             "0" "VOLTAR")
 
         local ret=$?
@@ -930,6 +1137,7 @@ categoria_4() {
             4) em4_restore_bios ;;
             5) em4_export_collection ;;
             6) em4_sync_with_usb ;;
+            7) em4_install_bios_from_usb ;;
             0) return ;;
         esac
     done

@@ -1096,8 +1096,15 @@ em_show_collection_stats() {
 
     local sys
     for sys in "${systems[@]}"; do
-        local count bytes
-        count=$(find "${ROMS_BASE_DIR}/${sys}" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        local count=0 bytes
+        # Conta apenas arquivos com extensão de ROM reconhecida (mesmo critério
+        # do scanner) para que os valores batam entre as duas opções.
+        local f
+        while IFS= read -r -d '' f; do
+            local ext="${f##*.}"
+            em_is_rom_extension "$ext" && ((count++))
+        done < <(find "${ROMS_BASE_DIR}/${sys}" -maxdepth 1 -type f -print0 2>/dev/null)
+
         bytes=$(du -sb "${ROMS_BASE_DIR}/${sys}" 2>/dev/null | cut -f1)
         bytes=${bytes:-0}
 
