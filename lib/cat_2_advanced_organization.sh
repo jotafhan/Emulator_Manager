@@ -1292,38 +1292,92 @@ em2_check_wrong_system() {
         [nds]="nds"   [pbp]="psp"
     )
 
-    local systems
-    mapfile -t systems < <(em_list_existing_systems)
+    # Pastas dentro de /roms/ que devem ser ignoradas na verificação
+    local SKIP_FOLDERS=("bios" "ports" "themes" "tools" "backup" "duplicatas" "descartados" "hacks" "nao_licenciados")
 
-    # Arquivo temporário: "caminho_atual TAB sistema_correto"
+    # Conta total de arquivos em /roms/ para gauge (excluindo pastas ignoradas)
+    local total_files=0
+    local f
+    while IFS= read -r -d '' f; do
+        # Verifica se o arquivo está dentro de uma pasta ignorada
+        local rel="${f#${ROMS_BASE_DIR}/}"
+        local top_folder; top_folder=$(echo "$rel" | cut -d'/' -f1)
+        local skip=0
+        for skip_dir in "${SKIP_FOLDERS[@]}"; do
+            [ "$top_folder" = "$skip_dir" ] && skip=1 && break
+        done
+        [ "$skip" -eq 0 ] && ((total_files++))
+    done < <(find "${ROMS_BASE_DIR}" -type f -print0 2>/dev/null)
+
+    if [ "$total_files" -eq 0 ]; then
+        DIALOG_MSG "Sistema Errado" "Nenhum arquivo encontrado em ${ROMS_BASE_DIR}."
+        return
+    fi
+
     local wrong_file="${EM_TMP_DIR}/wrong_system.tsv"
-    > "$wrong_file"
-
     local report="${EM_DATA_DIR}/wrong_system_report.txt"
+    > "$wrong_file"
     echo "ROMs em sistema errado - $(date '+%Y-%m-%d %H:%M:%S')" > "$report"
+    echo "Varredura em: ${ROMS_BASE_DIR} (recursiva)" >> "$report"
+    echo "" >> "$report"
 
-    local found=0
-    local sysname f
-    for sysname in "${systems[@]}"; do
-        while IFS= read -r -d '' f; do
-            local ext="${f##*.}"
-            ext="${ext,,}"
-            local expected="${EXT_TO_SYS[$ext]:-}"
-            [ -z "$expected" ] && continue
-            [ "$expected" = "$sysname" ] && continue
-            # Só sugere mover se a pasta de destino existir
-            [ ! -d "${ROMS_BASE_DIR}/${expected}" ] && continue
-            printf '%s\t%s\n' "$f" "$expected" >> "$wrong_file"
-            printf 'ATUAL: %s/  ESPERADO: %s/  ARQUIVO: %s\n' \
-                "$sysname" "$expected" "$(basename "$f")" >> "$report"
-            ((found++))
-        done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
-    done
+    local found_file="${EM_TMP_DIR}/wrong_found"
+    echo 0 > "$found_file"
+    em_drain_tty_buffer
 
+    (
+    local processed=0
+    while IFS= read -r -d '' f; do
+        # Verifica se está numa pasta ignorada
+        local rel="${f#${ROMS_BASE_DIR}/}"
+        local top_folder; top_folder=$(echo "$rel" | cut -d'/' -f1)
+        local skip=0
+        for skip_dir in "${SKIP_FOLDERS[@]}"; do
+            [ "$top_folder" = "$skip_dir" ] && skip=1 && break
+        done
+        [ "$skip" -eq 1 ] && continue
+
+        ((processed++))
+        [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
+
+        local ext="${f##*.}"
+        ext="${ext,,}"
+        local expected="${EXT_TO_SYS[$ext]:-}"
+        # Extensão ambígua (bin, iso, zip...) ou não mapeada — pula
+        [ -z "$expected" ] && continue
+
+        # Determina a pasta atual do arquivo em relação a /roms/
+        local rel_path="${f#${ROMS_BASE_DIR}/}"
+        local current_folder
+        current_folder=$(echo "$rel_path" | cut -d'/' -f1)
+
+        # Está na pasta correta — pula
+        [ "$current_folder" = "$expected" ] && continue
+
+        # Pasta de destino deve existir no device
+        [ ! -d "${ROMS_BASE_DIR}/${expected}" ] && continue
+
+        # Registra para mover
+        printf '%s\t%s\n' "$f" "$expected" >> "$wrong_file"
+        printf 'ATUAL: %s  ESPERADO: %s/  ARQUIVO: %s\n' \
+            "$current_folder" "$expected" "$(basename "$f")" >> "$report"
+
+        local n; n=$(cat "$found_file")
+        echo $(( n + 1 )) > "$found_file"
+    done < <(find "${ROMS_BASE_DIR}" -type f -print0 2>/dev/null)
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Verificar Sistema Errado" \
+        --gauge "Varrendo ${ROMS_BASE_DIR} recursivamente...\n(Ignorando: bios/ ports/ themes/ tools/)" 9 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    local found
+    found=$(cat "$found_file" 2>/dev/null || echo 0)
+    rm -f "$found_file"
     chown ark:ark "$report" 2>/dev/null || true
 
     if [ "$found" -eq 0 ]; then
-        DIALOG_MSG "Sistema Errado" "Todas as ROMs estao nas pastas corretas."
+        DIALOG_MSG "Sistema Errado" \
+            "Nenhuma ROM encontrada fora da pasta correta.\n\nArquivos verificados: ${total_files}"
         rm -f "$wrong_file"
         return
     fi
@@ -1332,11 +1386,10 @@ em2_check_wrong_system() {
     local preview=""
     local shown=0
     while IFS=$'\t' read -r fpath expected; do
-        local current_sys
-        current_sys=$(basename "$(dirname "$fpath")")
-        local fname
-        fname=$(basename "$fpath")
-        preview+="${fname}\n  ${current_sys}/ → ${expected}/\n\n"
+        local rel="${fpath#${ROMS_BASE_DIR}/}"
+        local current_folder; current_folder=$(echo "$rel" | cut -d'/' -f1)
+        local fname; fname=$(basename "$fpath")
+        preview+="${fname}\n  ${current_folder}/ → ${expected}/\n\n"
         ((shown++))
         [ "$shown" -ge 12 ] && break
     done < "$wrong_file"
@@ -1346,7 +1399,7 @@ em2_check_wrong_system() {
     # Pergunta se quer mover
     local confirm
     confirm=$(DIALOG_YESNO "ROMs em pasta errada" \
-        "ROMs possivelmente na pasta errada: ${found}\n\n${preview}${overflow}Deseja mover as ROMs para as pastas corretas agora?")
+        "ROMs encontradas fora da pasta correta: ${found}\n\n${preview}${overflow}Deseja mover as ROMs para as pastas corretas agora?")
 
     if [ "$confirm" -ne 0 ]; then
         DIALOG_MSG "Sistema Errado" \
@@ -1355,16 +1408,23 @@ em2_check_wrong_system() {
         return
     fi
 
-    # Move os arquivos para as pastas corretas
-    local moved=0
-    local errors=0
+    # Move com gauge de progresso
+    local total_to_move
+    total_to_move=$(wc -l < "$wrong_file")
+    local moved_file="${EM_TMP_DIR}/wrong_moved"
+    local errors_file="${EM_TMP_DIR}/wrong_errors"
+    echo 0 > "$moved_file"; echo 0 > "$errors_file"
+    em_drain_tty_buffer
+
+    (
+    local processed=0 moved=0 errors=0
     while IFS=$'\t' read -r fpath expected; do
+        ((processed++))
+        [ "$total_to_move" -gt 0 ] && echo $(( processed * 100 / total_to_move ))
         local dest_dir="${ROMS_BASE_DIR}/${expected}"
-        local fname
-        fname=$(basename "$fpath")
+        local fname; fname=$(basename "$fpath")
         local dest="${dest_dir}/${fname}"
 
-        # Trata conflito de nome
         if [ -e "$dest" ]; then
             local base="${fname%.*}"
             local ext="${fname##*.}"
@@ -1375,14 +1435,21 @@ em2_check_wrong_system() {
 
         if mv -- "$fpath" "$dest" 2>/dev/null; then
             echo "[MOVIDO] $(basename "$fpath") → ${expected}/" >> "$report"
-            ((moved++))
+            ((moved++)); echo "$moved" > "$moved_file"
         else
             echo "[ERRO] $(basename "$fpath")" >> "$report"
-            ((errors++))
+            ((errors++)); echo "$errors" > "$errors_file"
         fi
     done < "$wrong_file"
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Sistema Errado" \
+        --gauge "Movendo ROMs para as pastas corretas..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
 
-    rm -f "$wrong_file"
+    local moved errors
+    moved=$(cat "$moved_file" 2>/dev/null || echo 0)
+    errors=$(cat "$errors_file" 2>/dev/null || echo 0)
+    rm -f "$wrong_file" "$moved_file" "$errors_file"
     chown ark:ark "$report" 2>/dev/null || true
 
     local result="ROMs movidas para pasta correta: ${moved}"
