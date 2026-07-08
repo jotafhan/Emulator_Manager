@@ -29,7 +29,7 @@ EM_DATS_DIR="${EM_DATA_DIR}/dats"
 #   Alteracao em opcao existente  → +0.0.1
 #   Nova opcao dentro de modulo   → +0.1.0
 #   Novo modulo                   → versao = numero de modulos (ex: 7 modulos = 7.0.0)
-EM_VERSION="6.0.1"
+EM_VERSION="6.1.0"
 
 # --- Arquivo de registro de última modificação ---
 # Formato: DATA HORA|MODULO|DESCRICAO

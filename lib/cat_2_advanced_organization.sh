@@ -311,7 +311,261 @@ em2_organize_by_region() {
 }
 
 # =============================================================================
-# 2. SEPARAR BIOS
+# 2. ORGANIZAR POR GÊNERO (via arquivo .dat ClrMamePro ou No-Intro XML)
+# Usa CRC32 para identificar cada ROM e obter o gênero do .dat.
+# Move para /roms/<sistema>/<Genero>/ ou /roms/<sistema>/Outros/ se sem match.
+# Suporta: ClrMamePro (.dat com genre "...") e No-Intro XML (<genre>...</genre>)
+# =============================================================================
+
+em2_build_genre_index_clrmame() {
+    local dat_file="$1"
+    local index_file="$2"
+    python3 - "$dat_file" "$index_file" <<'PYEOF'
+import sys, re
+dat_path = sys.argv[1]
+idx_path = sys.argv[2]
+try:
+    with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+except Exception as e:
+    print(f"ERRO: {e}", file=sys.stderr)
+    sys.exit(1)
+count = 0
+with open(idx_path, 'w', encoding='utf-8') as out:
+    for block in re.finditer(r'game\s*\((.+?)\)', content, re.DOTALL):
+        body = block.group(1)
+        genre_m = re.search(r'genre\s+"([^"]+)"', body)
+        crc_m   = re.search(r'crc\s+([0-9A-Fa-f]{8})', body)
+        if genre_m and crc_m:
+            out.write(f"{crc_m.group(1).lower()}\t{genre_m.group(1).strip()}\n")
+            count += 1
+print(count)
+PYEOF
+}
+
+em2_build_genre_index_xml() {
+    local dat_file="$1"
+    local index_file="$2"
+    python3 - "$dat_file" "$index_file" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
+dat_path = sys.argv[1]
+idx_path = sys.argv[2]
+try:
+    tree = ET.parse(dat_path)
+except Exception as e:
+    print(f"ERRO: {e}", file=sys.stderr)
+    sys.exit(1)
+root = tree.getroot()
+count = 0
+with open(idx_path, 'w', encoding='utf-8') as out:
+    for game in root.findall('game'):
+        genre = game.findtext('genre', '').strip()
+        if not genre:
+            continue
+        for rom in game.findall('rom'):
+            crc = rom.get('crc', '').strip().lower()
+            if crc:
+                out.write(f"{crc}\t{genre}\n")
+                count += 1
+print(count)
+PYEOF
+}
+
+em2_build_genre_index() {
+    local dat_file="$1"
+    local index_file="$2"
+    local first_line
+    first_line=$(grep -m1 -v '^[[:space:]]*$' "$dat_file" 2>/dev/null)
+    if echo "$first_line" | grep -qi 'clrmamepro\|^game ('; then
+        em2_build_genre_index_clrmame "$dat_file" "$index_file"
+    else
+        em2_build_genre_index_xml "$dat_file" "$index_file"
+    fi
+}
+
+em2_organize_by_genre() {
+    if ! em_has_tool python3; then
+        DIALOG_MSG "Organizar por Genero" \
+            "python3 nao encontrado.\n\nEsta funcao requer python3 para ler o arquivo .dat."
+        return
+    fi
+
+    local systems
+    mapfile -t systems < <(em_list_existing_systems)
+    if [ "${#systems[@]}" -eq 0 ]; then
+        DIALOG_MSG "Organizar por Genero" "Nenhum sistema encontrado em ${ROMS_BASE_DIR}."
+        return
+    fi
+
+    local menu_items=()
+    local sys
+    for sys in "${systems[@]}"; do
+        menu_items+=("$sys" "$sys")
+    done
+
+    local chosen_sys
+    chosen_sys=$(DIALOG_MENU "Organizar por Genero" \
+        "Escolha o sistema:" "${menu_items[@]}")
+    [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+    local dats_dir="${EM_DATA_DIR}/dats"
+    mkdir -p "$dats_dir" 2>/dev/null
+
+    # Detecta .dat compatível com o sistema usando o mesmo mapa da opção 3
+    local auto_dat=""
+    local f
+    while IFS= read -r -d '' f; do
+        local fname_lower
+        fname_lower="$(basename "$f" | tr '[:upper:]' '[:lower:]')"
+        if em_dat_matches_system "$fname_lower" "$chosen_sys" 2>/dev/null; then
+            auto_dat="$f"
+            break
+        fi
+    done < <(find "$dats_dir" -maxdepth 1 -name "*.dat" -print0 2>/dev/null)
+
+    if [ -z "$auto_dat" ]; then
+        DIALOG_MSG "Arquivo .dat nao encontrado" \
+            "Nenhum arquivo .dat encontrado para '${chosen_sys}'.\n\nColoque o arquivo .dat em:\n  ${dats_dir}/\n\nO script suporta formatos ClrMamePro e No-Intro XML.\nO mesmo arquivo usado para renomear (opcao 3) funciona aqui."
+        return
+    fi
+
+    local confirm
+    confirm=$(DIALOG_YESNO "Arquivo .dat encontrado" \
+        "Arquivo .dat encontrado:\n\n$(basename "$auto_dat")\n\nUsar este arquivo para organizar por genero?")
+    [ "$confirm" -ne 0 ] && return
+
+    # Constrói ou reutiliza índice CRC32->genero
+    local index_file="${dats_dir}/${chosen_sys}_genre_index.tsv"
+    if [ ! -f "$index_file" ] || [ "$auto_dat" -nt "$index_file" ]; then
+        DIALOG_MSG "Indexando .dat" "Processando arquivo .dat...\nIsso leva alguns segundos na primeira vez."
+        local entry_count
+        entry_count=$(em2_build_genre_index "$auto_dat" "$index_file")
+        if [ $? -ne 0 ] || [ ! -s "$index_file" ]; then
+            DIALOG_MSG "Erro" "Nao foi possivel processar o arquivo .dat:\n$(basename "$auto_dat")"
+            rm -f "$index_file"
+            return
+        fi
+        chown ark:ark "$index_file" 2>/dev/null || true
+    fi
+
+    # Conta ROMs na raiz do sistema
+    local rom_dir="${ROMS_BASE_DIR}/${chosen_sys}"
+    local total_roms=0
+    while IFS= read -r -d '' f; do
+        local ext="${f##*.}"
+        em_is_rom_extension "$ext" && ((total_roms++))
+    done < <(find "$rom_dir" -maxdepth 1 -type f -print0 2>/dev/null)
+
+    if [ "$total_roms" -eq 0 ]; then
+        DIALOG_MSG "Organizar por Genero" "Nenhuma ROM encontrada na raiz de:\n${rom_dir}"
+        return
+    fi
+
+    # Calcula CRC32 e cruza com índice de gêneros
+    local genre_map="${EM_TMP_DIR}/genre_map.tsv"
+    local cancel_file="${EM_TMP_DIR}/genre_cancelled"
+    > "$genre_map"
+    rm -f "$cancel_file"
+    em_drain_tty_buffer
+
+    (
+    local processed=0
+    while IFS= read -r -d '' f; do
+        local ext="${f##*.}"
+        em_is_rom_extension "$ext" || continue
+        if em_check_cancel_key; then
+            echo "1" > "$cancel_file"; exit 0
+        fi
+        ((processed++))
+        echo $(( processed * 100 / total_roms ))
+        local crc
+        crc=$(em_calc_rom_crc32 "$f")
+        local genre=""
+        [ -n "$crc" ] && genre=$(grep -m1 "^${crc}"$'\t' "$index_file" 2>/dev/null | cut -f2)
+        [ -z "$genre" ] && genre="Outros"
+        printf '%s\t%s\n' "$f" "$genre" >> "$genre_map"
+    done < <(find "$rom_dir" -maxdepth 1 -type f -print0 2>/dev/null)
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Organizar por Genero" \
+        --gauge "Identificando generos via CRC32...\n(Aperte B/VOLTAR para cancelar)" 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    if [ -f "$cancel_file" ]; then
+        rm -f "$cancel_file" "$genre_map"
+        DIALOG_MSG "Cancelado" "Operacao cancelada.\nNenhuma ROM foi movida."
+        return
+    fi
+
+    local total_mapped=0
+    [ -s "$genre_map" ] && total_mapped=$(wc -l < "$genre_map")
+
+    if [ "$total_mapped" -eq 0 ]; then
+        DIALOG_MSG "Organizar por Genero" "Nenhuma ROM identificada."
+        rm -f "$genre_map"; return
+    fi
+
+    # Prévia dos gêneros encontrados
+    local genre_summary
+    genre_summary=$(cut -f2 "$genre_map" | sort | uniq -c | sort -rn | \
+        awk '{printf "  %-25s %d\n", $2, $1}' | head -12)
+    local outros_count
+    outros_count=$(grep -c $'\tOutros$' "$genre_map" 2>/dev/null || echo 0)
+
+    local confirm2
+    confirm2=$(DIALOG_YESNO "Confirmar Organizacao" \
+        "Sistema: ${chosen_sys}  |  ROMs: ${total_mapped}\n\nGeneros encontrados:\n${genre_summary}\n\nSem correspondencia → Outros/ (${outros_count} ROM(s))\n\nDeseja mover as ROMs agora?")
+    [ "$confirm2" -ne 0 ] && { rm -f "$genre_map"; return; }
+
+    # Move com barra de progresso
+    local total_to_move
+    total_to_move=$(wc -l < "$genre_map")
+    local moved_file="${EM_TMP_DIR}/genre_moved"
+    local errors_file="${EM_TMP_DIR}/genre_errors"
+    echo 0 > "$moved_file"; echo 0 > "$errors_file"
+    local report="${EM_DATA_DIR}/genre_report.txt"
+    echo "Organizar por Genero - ${chosen_sys} - $(date '+%Y-%m-%d %H:%M:%S')" > "$report"
+    em_drain_tty_buffer
+
+    (
+    local processed=0 moved=0 errors=0
+    while IFS=$'\t' read -r fpath genre; do
+        ((processed++))
+        echo $(( processed * 100 / total_to_move ))
+        local dest_dir="${rom_dir}/${genre}"
+        mkdir -p "$dest_dir" 2>/dev/null
+        chown ark:ark "$dest_dir" 2>/dev/null || true
+        local fname; fname=$(basename "$fpath")
+        local dest="${dest_dir}/${fname}"
+        if [ -e "$dest" ]; then
+            local base="${fname%.*}" ext="${fname##*.}" i=2
+            while [ -e "${dest_dir}/${base}_${i}.${ext}" ]; do ((i++)); done
+            dest="${dest_dir}/${base}_${i}.${ext}"
+        fi
+        if mv -- "$fpath" "$dest" 2>/dev/null; then
+            echo "[OK] ${fname} → ${genre}/" >> "$report"
+            ((moved++)); echo "$moved" > "$moved_file"
+        else
+            echo "[ERRO] ${fname}" >> "$report"
+            ((errors++)); echo "$errors" > "$errors_file"
+        fi
+    done < "$genre_map"
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Organizar por Genero" \
+        --gauge "Movendo ROMs para subpastas por genero..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    local moved errors
+    moved=$(cat "$moved_file" 2>/dev/null || echo 0)
+    errors=$(cat "$errors_file" 2>/dev/null || echo 0)
+    rm -f "$genre_map" "$moved_file" "$errors_file"
+    chown ark:ark "$report" 2>/dev/null || true
+
+    DIALOG_MSG "Organizar por Genero - Concluido" \
+        "ROMs movidas: ${moved}\nErros: ${errors}\n\nRelatorio salvo em:\n${report}"
+}
+
+# =============================================================================
+# 3. SEPARAR BIOS
 # =============================================================================
 em2_separate_bios() {
     local systems
@@ -1486,15 +1740,16 @@ categoria_2() {
         local choice
         choice=$(DIALOG_MENU "Organizacao Avancada" "Selecione uma opcao:" \
             "1"  "Organizar por Regiao" \
-            "2"  "Separar BIOS" \
-            "3"  "Remover Beta/Proto/Demo/Sample" \
-            "4"  "Filtro 1G1R (melhor versao por titulo)" \
-            "5"  "Remover Hacks e Traducoes" \
-            "6"  "Limpar Tags do Nome" \
-            "7"  "Padronizar Maiusculas (Title Case)" \
-            "8"  "Exportar Lista de ROMs" \
-            "9"  "Comparar com Lista Externa" \
-            "10" "Manutencao da Colecao" \
+            "2"  "Organizar por Genero" \
+            "3"  "Separar BIOS" \
+            "4"  "Remover Beta/Proto/Demo/Sample" \
+            "5"  "Filtro 1G1R (melhor versao por titulo)" \
+            "6"  "Remover Hacks e Traducoes" \
+            "7"  "Limpar Tags do Nome" \
+            "8"  "Padronizar Maiusculas (Title Case)" \
+            "9"  "Exportar Lista de ROMs" \
+            "10" "Comparar com Lista Externa" \
+            "11" "Manutencao da Colecao" \
             "0"  "VOLTAR")
 
         local ret=$?
@@ -1502,15 +1757,16 @@ categoria_2() {
 
         case "$choice" in
             1)  em2_organize_by_region ;;
-            2)  em2_separate_bios ;;
-            3)  em2_remove_unlicensed ;;
-            4)  em2_filter_1g1r ;;
-            5)  em2_remove_hacks ;;
-            6)  em2_clean_tags ;;
-            7)  em2_title_case_roms ;;
-            8)  em2_export_list ;;
-            9)  em2_compare_with_list ;;
-            10) em2_maintenance ;;
+            2)  em2_organize_by_genre ;;
+            3)  em2_separate_bios ;;
+            4)  em2_remove_unlicensed ;;
+            5)  em2_filter_1g1r ;;
+            6)  em2_remove_hacks ;;
+            7)  em2_clean_tags ;;
+            8)  em2_title_case_roms ;;
+            9)  em2_export_list ;;
+            10) em2_compare_with_list ;;
+            11) em2_maintenance ;;
             0)  return ;;
         esac
     done
