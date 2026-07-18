@@ -322,23 +322,42 @@ em2_build_genre_index_clrmame() {
     local index_file="$2"
     python3 - "$dat_file" "$index_file" <<'PYEOF'
 import sys, re
+
 dat_path = sys.argv[1]
 idx_path = sys.argv[2]
+
 try:
     with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
         content = f.read()
 except Exception as e:
     print(f"ERRO: {e}", file=sys.stderr)
     sys.exit(1)
+
 count = 0
 with open(idx_path, 'w', encoding='utf-8') as out:
-    for block in re.finditer(r'game\s*\((.+?)\)', content, re.DOTALL):
+    # Extrai cada bloco game ( ... ) — termina na linha com só ")"
+    for block in re.finditer(r'game\s*\((.+?)\n\)', content, re.DOTALL):
         body = block.group(1)
+
         genre_m = re.search(r'genre\s+"([^"]+)"', body)
-        crc_m   = re.search(r'crc\s+([0-9A-Fa-f]{8})', body)
-        if genre_m and crc_m:
-            out.write(f"{crc_m.group(1).lower()}\t{genre_m.group(1).strip()}\n")
+        if not genre_m:
+            continue
+        genre = genre_m.group(1).strip()
+
+        # CRC pode estar dentro de rom ( crc XXXXXXXX ) ou direto
+        crc = None
+        rom_m = re.search(r'rom\s*\([^)]*crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+        if rom_m:
+            crc = rom_m.group(1).lower()
+        else:
+            crc_m = re.search(r'\bcrc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+            if crc_m:
+                crc = crc_m.group(1).lower()
+
+        if crc:
+            out.write(f"{crc}\t{genre}\n")
             count += 1
+
 print(count)
 PYEOF
 }
@@ -376,6 +395,7 @@ em2_build_genre_index() {
     local index_file="$2"
     local first_line
     first_line=$(grep -m1 -v '^[[:space:]]*$' "$dat_file" 2>/dev/null)
+    # ClrMamePro começa com "clrmamepro (" ou "game ("
     if echo "$first_line" | grep -qi 'clrmamepro\|^game ('; then
         em2_build_genre_index_clrmame "$dat_file" "$index_file"
     else
