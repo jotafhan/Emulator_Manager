@@ -234,28 +234,65 @@ em_dat_build_index() {
     local index_file="$2"
 
     python3 - "$dat_file" "$index_file" <<'PYEOF'
-import sys, xml.etree.ElementTree as ET, os
+import sys, os, re
 
-dat_path  = sys.argv[1]
-idx_path  = sys.argv[2]
+dat_path = sys.argv[1]
+idx_path = sys.argv[2]
 
 try:
-    tree = ET.parse(dat_path)
+    with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
 except Exception as e:
     print(f"ERRO: nao foi possivel ler o .dat: {e}", file=sys.stderr)
     sys.exit(1)
 
-root = tree.getroot()
+first_line = content.lstrip().split('\n')[0].lower()
 count = 0
-with open(idx_path, "w", encoding="utf-8") as out:
-    for game in root.findall("game"):
-        for rom in game.findall("rom"):
-            crc = rom.get("crc", "").strip().lower()
-            rom_name = rom.get("name", "").strip()
-            if crc and rom_name:
-                canonical = os.path.splitext(rom_name)[0]
+
+# --- Formato ClrMamePro ---
+if 'clrmamepro' in first_line or first_line.startswith('game ('):
+    with open(idx_path, 'w', encoding='utf-8') as out:
+        for block in re.finditer(r'game\s*\((.+?)\n\)', content, re.DOTALL):
+            body = block.group(1)
+
+            # Nome canônico: campo "comment" ou "name"
+            name_m = re.search(r'(?:comment|name)\s+"([^"]+)"', body)
+            if not name_m:
+                continue
+            canonical = os.path.splitext(name_m.group(1).strip())[0]
+
+            # CRC dentro de rom ( crc XXXXXXXX ) ou direto
+            crc = None
+            rom_m = re.search(r'rom\s*\([^)]*crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+            if rom_m:
+                crc = rom_m.group(1).lower()
+            else:
+                crc_m = re.search(r'\bcrc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+                if crc_m:
+                    crc = crc_m.group(1).lower()
+
+            if crc and canonical:
                 out.write(f"{crc}\t{canonical}\n")
                 count += 1
+
+# --- Formato No-Intro XML ---
+else:
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(content)
+    except Exception as e:
+        print(f"ERRO: nao foi possivel ler o .dat: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(idx_path, 'w', encoding='utf-8') as out:
+        for game in root.findall('game'):
+            for rom in game.findall('rom'):
+                crc = rom.get('crc', '').strip().lower()
+                rom_name = rom.get('name', '').strip()
+                if crc and rom_name:
+                    canonical = os.path.splitext(rom_name)[0]
+                    out.write(f"{crc}\t{canonical}\n")
+                    count += 1
 
 print(count)
 PYEOF
