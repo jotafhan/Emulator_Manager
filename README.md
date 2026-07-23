@@ -6,13 +6,6 @@ Ferramenta modular de gerenciamento de emuladores e ROMs para handhelds retro, c
 
 ## Versão atual: 6.1.0
 
-### Regras de versionamento
-| Tipo de alteração | Incremento |
-|---|---|
-| Alteração em opção existente | `+0.0.1` |
-| Nova opção dentro de um módulo | `+0.1.0` |
-| Novo módulo | versão = número de módulos (ex: 7 módulos → `7.0.0`) |
-
 ---
 
 ## Compatibilidade
