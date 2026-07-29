@@ -4,7 +4,7 @@ Ferramenta modular de gerenciamento de emuladores e ROMs para handhelds retro, c
 
 ---
 
-## Versão atual: 6.1.0
+## Versão atual: 6.2.0
 
 ---
 
