@@ -211,9 +211,13 @@ _em5_aplicar() {
         printf "  Atualizando: %s\n" "$arq" > "$CURR_TTY"
 
         # Backup do arquivo local
+        # Separador '@' em vez de '_': evita ambiguidade na reversão quando
+        # o path original já contém underscores (ex: cat_1_rom_management.sh).
+        # Formato do nome: lib@cat_1_rom_management.sh.bak
+        #   → split no primeiro '@' devolve o path relativo exato.
         if [ -f "$full_local" ]; then
             local bak_nome
-            bak_nome=$(echo "$arq" | tr '/' '_')
+            bak_nome=$(echo "$arq" | tr '/' '@')
             cp "$full_local" "${bak_dir}/${bak_nome}.bak" 2>/dev/null
         fi
 
@@ -334,9 +338,10 @@ _em5_reverter() {
     local bak
     for bak in "${bak_path}"/*.bak; do
         [ -f "$bak" ] || continue
-        # Reconstrói o caminho original: _ volta a /
+        # Reconstrói o caminho original: troca '@' por '/' (separador seguro
+        # que não conflita com underscores legítimos nos nomes de arquivo).
         local dest_rel
-        dest_rel=$(basename "$bak" .bak | tr '_' '/')
+        dest_rel=$(basename "$bak" .bak | tr '@' '/')
         local dest="${EM_BASE_DIR}/${dest_rel}"
         printf "  Restaurando: %s\n" "$dest_rel" > "$CURR_TTY"
         if cp "$bak" "$dest" 2>/dev/null; then

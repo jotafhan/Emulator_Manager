@@ -239,6 +239,26 @@ em_is_no_compress_system() {
     return 1
 }
 
+# --- Detecta pendrives/dispositivos externos montados ---
+# Verifica /media, /media/ark, /mnt (automount) e /proc/mounts (sd*/usb*).
+# Retorna um ponto de montagem por linha, apenas os que são graváveis.
+# Usado pelos módulos 3 e 4 — centralizado aqui para evitar duplicação.
+em_find_usb_mounts() {
+    local base mp dev mount rest
+    for base in /media /media/ark /mnt; do
+        [ -d "$base" ] || continue
+        while IFS= read -r -d '' mp; do
+            [ "$mp" = "$base" ] && continue
+            [ -w "$mp" ] && echo "$mp"
+        done < <(find "$base" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null)
+    done
+    # Também verifica montagens ativas via /proc/mounts para dispositivos sd*/usb*
+    while IFS=' ' read -r dev mount rest; do
+        echo "$dev" | grep -qE '^/dev/sd[b-z]|^/dev/usb' || continue
+        [ -w "$mount" ] && echo "$mount"
+    done < /proc/mounts 2>/dev/null
+}
+
 # --- Lista os diretórios de sistema existentes dentro de /roms ---
 # Retorna apenas os que realmente existem no dispositivo (interseção entre
 # KNOWN_SYSTEMS e o que está em ROMS_BASE_DIR), evitando assumir sistemas

@@ -89,7 +89,7 @@ em_scan_new_roms() {
         DIALOG_MSG "Scanner de ROMs" "Scan concluido.\n\nTotal de ROMs encontradas: ${total_files}\nNenhuma ROM nova desde o ultimo scan."
     else
         local preview
-        preview=$(echo -e "$new_list" | head -n 15)
+        preview=$(printf '%b' "$new_list" | head -n 15)
         DIALOG_MSG "Scanner de ROMs" "Scan concluido.\n\nTotal de ROMs encontradas: ${total_files}\nNovas desde o ultimo scan: ${new_count}\n\n${preview}"
     fi
 }
@@ -263,7 +263,7 @@ if 'clrmamepro' in first_line or first_line.startswith('game ('):
 
             # CRC dentro de rom ( crc XXXXXXXX ) ou direto
             crc = None
-            rom_m = re.search(r'rom\s*\([^)]*crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+            rom_m = re.search(r'^\s*rom\s*\(.*?crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE | re.MULTILINE)
             if rom_m:
                 crc = rom_m.group(1).lower()
             else:
@@ -330,6 +330,89 @@ PYEOF
     fi
 }
 
+
+# =============================================================================
+# MAPA DE PALAVRAS-CHAVE E FUNÇÃO DE CORRESPONDÊNCIA DE .DAT
+# Definidos no escopo global para que cat_2 (organizar por gênero) também
+# possa usar em_dat_matches_system sem depender de em_rename_database ter
+# sido chamada antes.
+# =============================================================================
+
+# Mapa de palavras-chave EXCLUSIVAS por sistema para detecção do .dat.
+# Usa termos que aparecem nos nomes reais dos arquivos No-Intro/Redump
+# e que NÃO se sobrepõem entre sistemas (ex: "game_boy_advance" é exclusivo
+# de gba e não bate em "game_boy" do gb).
+declare -A EM_DAT_KEYWORDS
+EM_DAT_KEYWORDS["gba"]="game_boy_advance|game boy advance"
+EM_DAT_KEYWORDS["gb"]="game_boy(?!.*(advance|color|colour))"
+EM_DAT_KEYWORDS["gbc"]="game_boy_color|game boy color|game_boy_colour|game boy colour"
+EM_DAT_KEYWORDS["nes"]="nintendo_entertainment_system|nintendo entertainment system"
+EM_DAT_KEYWORDS["snes"]="super_nintendo|super nintendo"
+EM_DAT_KEYWORDS["n64"]="nintendo_64|nintendo 64"
+EM_DAT_KEYWORDS["nds"]="nintendo_ds|nintendo ds"
+EM_DAT_KEYWORDS["psx"]="playstation(?!.*2)|sony.*playstation(?!.*2)"
+EM_DAT_KEYWORDS["ps2"]="playstation_2|playstation 2"
+EM_DAT_KEYWORDS["psp"]="playstation_portable|playstation portable"
+EM_DAT_KEYWORDS["megadrive"]="mega_drive|mega drive|genesis"
+EM_DAT_KEYWORDS["mastersystem"]="master_system|master system|mark_iii|mark iii"
+EM_DAT_KEYWORDS["gamegear"]="game_gear|game gear"
+EM_DAT_KEYWORDS["sega32x"]="32x|sega_32x|sega 32x"
+EM_DAT_KEYWORDS["segacd"]="mega.cd|sega.cd|mega-cd|sega-cd"
+EM_DAT_KEYWORDS["saturn"]="saturn"
+EM_DAT_KEYWORDS["dreamcast"]="dreamcast"
+EM_DAT_KEYWORDS["neogeo"]="neo.geo|neo geo"
+EM_DAT_KEYWORDS["atari2600"]="atari.*2600|2600"
+EM_DAT_KEYWORDS["atarilynx"]="atari.*lynx|lynx"
+
+# Função de correspondência: usa palavras-chave do mapa acima.
+# Disponível globalmente para que cat_2 (organizar por gênero) possa
+# reutilizá-la sem precisar que em_rename_database tenha sido executada.
+em_dat_matches_system() {
+    local fname_lower="$1"   # nome do arquivo em lowercase
+    local sys="$2"
+
+    # 1. Correspondência exata: arquivo se chama exatamente "<sys>.dat"
+    local base="${fname_lower%.dat}"
+    [ "$base" = "$sys" ] && return 0
+
+    # 2. Casos especiais com sobreposição de nome
+    case "$sys" in
+        gb)
+            # Deve conter "game_boy" ou "game boy" MAS não "advance", "color" ou "colour"
+            echo "$fname_lower" | grep -qiE "game.boy" || return 1
+            echo "$fname_lower" | grep -qiE "advance|color|colour" && return 1
+            return 0
+            ;;
+        gbc)
+            echo "$fname_lower" | grep -qiE "game.boy.col" && return 0
+            return 1
+            ;;
+        gba)
+            echo "$fname_lower" | grep -qiE "game.boy.adv" && return 0
+            return 1
+            ;;
+        nes)
+            # "nintendo entertainment system" sem "super" antes
+            echo "$fname_lower" | grep -qiE "nintendo.entertainment" || return 1
+            echo "$fname_lower" | grep -qiE "super" && return 1
+            return 0
+            ;;
+        snes)
+            echo "$fname_lower" | grep -qiE "super.nintendo" && return 0
+            return 1
+            ;;
+        *)
+            # Para os outros sistemas usa palavras-chave do mapa
+            local keywords="${EM_DAT_KEYWORDS[$sys]:-}"
+            if [ -n "$keywords" ]; then
+                echo "$fname_lower" | grep -qiE "$keywords" && return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
 em_rename_database() {
     if ! em_has_tool python3; then
         DIALOG_MSG "Renomear ROMs" "python3 nao encontrado.\n\nEsta funcao requer python3 para ler o arquivo .dat e calcular CRC32."
@@ -356,79 +439,6 @@ em_rename_database() {
     local dats_dir="${EM_DATA_DIR}/dats"
     mkdir -p "$dats_dir"
     chown ark:ark "$dats_dir" 2>/dev/null || true
-
-    # Mapa de palavras-chave EXCLUSIVAS por sistema para detecção do .dat.
-    # Usa termos que aparecem nos nomes reais dos arquivos No-Intro/Redump
-    # e que NÃO se sobrepõem entre sistemas (ex: "game_boy_advance" é exclusivo
-    # de gba e não bate em "game_boy" do gb).
-    declare -A EM_DAT_KEYWORDS
-    EM_DAT_KEYWORDS["gba"]="game_boy_advance|game boy advance"
-    EM_DAT_KEYWORDS["gb"]="game_boy_color|game boy color|game_boy_colour|game boy colour"  # gbc first
-    EM_DAT_KEYWORDS["gbc"]="game_boy_color|game boy color|game_boy_colour|game boy colour"
-    EM_DAT_KEYWORDS["nes"]="nintendo_entertainment_system|nintendo entertainment system"
-    EM_DAT_KEYWORDS["snes"]="super_nintendo|super nintendo"
-    EM_DAT_KEYWORDS["n64"]="nintendo_64|nintendo 64"
-    EM_DAT_KEYWORDS["nds"]="nintendo_ds|nintendo ds"
-    EM_DAT_KEYWORDS["psx"]="playstation(?!.*2)|sony.*playstation(?!.*2)"
-    EM_DAT_KEYWORDS["ps2"]="playstation_2|playstation 2"
-    EM_DAT_KEYWORDS["psp"]="playstation_portable|playstation portable"
-    EM_DAT_KEYWORDS["megadrive"]="mega_drive|mega drive|genesis"
-    EM_DAT_KEYWORDS["mastersystem"]="master_system|master system|mark_iii|mark iii"
-    EM_DAT_KEYWORDS["gamegear"]="game_gear|game gear"
-    EM_DAT_KEYWORDS["sega32x"]="32x|sega_32x|sega 32x"
-    EM_DAT_KEYWORDS["segacd"]="mega.cd|sega.cd|mega-cd|sega-cd"
-    EM_DAT_KEYWORDS["saturn"]="saturn"
-    EM_DAT_KEYWORDS["dreamcast"]="dreamcast"
-    EM_DAT_KEYWORDS["neogeo"]="neo.geo|neo geo"
-    EM_DAT_KEYWORDS["atari2600"]="atari.*2600|2600"
-    EM_DAT_KEYWORDS["atarilynx"]="atari.*lynx|lynx"
-
-    # Função de correspondência: usa palavras-chave do mapa acima
-    em_dat_matches_system() {
-        local fname_lower="$1"   # nome do arquivo em lowercase
-        local sys="$2"
-
-        # 1. Correspondência exata: arquivo se chama exatamente "<sys>.dat"
-        local base="${fname_lower%.dat}"
-        [ "$base" = "$sys" ] && return 0
-
-        # 2. Casos especiais com sobreposição de nome
-        case "$sys" in
-            gb)
-                # Deve conter "game_boy" ou "game boy" MAS não "advance", "color" ou "colour"
-                echo "$fname_lower" | grep -qiE "game.boy" || return 1
-                echo "$fname_lower" | grep -qiE "advance|color|colour" && return 1
-                return 0
-                ;;
-            gbc)
-                echo "$fname_lower" | grep -qiE "game.boy.col" && return 0
-                return 1
-                ;;
-            gba)
-                echo "$fname_lower" | grep -qiE "game.boy.adv" && return 0
-                return 1
-                ;;
-            nes)
-                # "nintendo entertainment system" sem "super" antes
-                echo "$fname_lower" | grep -qiE "nintendo.entertainment" || return 1
-                echo "$fname_lower" | grep -qiE "super" && return 1
-                return 0
-                ;;
-            snes)
-                echo "$fname_lower" | grep -qiE "super.nintendo" && return 0
-                return 1
-                ;;
-            *)
-                # Para os outros sistemas usa palavras-chave do mapa
-                local keywords="${EM_DAT_KEYWORDS[$sys]:-}"
-                if [ -n "$keywords" ]; then
-                    echo "$fname_lower" | grep -qiE "$keywords" && return 0
-                fi
-                ;;
-        esac
-
-        return 1
-    }
 
     local auto_dat=""
     while IFS= read -r -d '' candidate; do
@@ -461,9 +471,22 @@ em_rename_database() {
         return
     fi
 
-    # Constrói ou reutiliza o índice CRC32->nome
+    # Constrói ou reutiliza o índice CRC32->nome.
+    # Reconstrói se: não existe, .dat é mais novo, está vazio, ou tem
+    # menos de 10 entradas (índice corrompido por bug de regex anterior).
     local index_file="${dats_dir}/${chosen_sys}_crc_index.tsv"
-    if [ ! -f "$index_file" ] || [ "$dat_file" -nt "$index_file" ]; then
+    local needs_rebuild=0
+    [ ! -f "$index_file" ]            && needs_rebuild=1
+    [ "$dat_file" -nt "$index_file" ] && needs_rebuild=1
+    [ ! -s "$index_file" ]            && needs_rebuild=1
+    if [ "$needs_rebuild" -eq 0 ]; then
+        local line_count
+        line_count=$(wc -l < "$index_file" 2>/dev/null || echo 0)
+        [ "$line_count" -lt 10 ] && needs_rebuild=1
+    fi
+
+    if [ "$needs_rebuild" -eq 1 ]; then
+        rm -f "$index_file"
         DIALOG_MSG "Indexando .dat" "Processando o arquivo .dat...\nIsso leva alguns segundos na primeira vez."
         local entry_count
         entry_count=$(em_dat_build_index "$dat_file" "$index_file")
@@ -677,7 +700,7 @@ em_compress_roms() {
         while IFS= read -r -d '' f; do
             local ext="${f##*.}"
             ext="${ext,,}"
-            [ "$ext" == "zip" ] || [ "$ext" == "7z" ] && continue
+            { [ "$ext" == "zip" ] || [ "$ext" == "7z" ]; } && continue
             em_is_rom_extension "$ext" && ((total_files++))
         done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
     done
@@ -702,7 +725,7 @@ em_compress_roms() {
         while IFS= read -r -d '' f; do
             local ext="${f##*.}"
             ext="${ext,,}"
-            [ "$ext" == "zip" ] || [ "$ext" == "7z" ] && continue
+            { [ "$ext" == "zip" ] || [ "$ext" == "7z" ]; } && continue
             em_is_rom_extension "$ext" || continue
 
             ((processed++))
@@ -889,11 +912,13 @@ em_find_duplicates() {
     fi
 
     local cancel_file="${EM_TMP_DIR}/dup_cancelled"
+    local count_file="${EM_TMP_DIR}/dup_count"
     rm -f "$cancel_file"
+    echo 0 > "$count_file"
     em_drain_tty_buffer
 
-    local count=0
     (
+    local count=0
     local sys
     for sys in "${systems[@]}"; do
         local f
@@ -912,11 +937,14 @@ em_find_duplicates() {
             h=$(em_calc_rom_hash "$f")
             [ -n "$h" ] && printf '%s\t%s\n' "$h" "$f" >> "$tmp_hashes"
             ((count++))
+            echo "$count" > "$count_file"
             # Porcentagem real: arquivos processados / total * 100
             echo $(( count * 100 / total_files ))
         done < <(find "${ROMS_BASE_DIR}/${sys}" -maxdepth 1 -type f -print0 2>/dev/null)
     done
     ) | DIALOG_GAUGE_CANCELABLE "Procurando Duplicadas" "Calculando hashes das ROMs...\nIsso pode levar varios minutos dependendo da colecao.\n\n(Aperte B/VOLTAR para cancelar)"
+
+    rm -f "$count_file"
 
     if [ -f "$cancel_file" ]; then
         rm -f "$cancel_file"
@@ -1081,6 +1109,337 @@ em_find_duplicates() {
 }
 
 # -----------------------------------------------------------------------------
+# 6b. DETECTAR VERSÕES MÚLTIPLAS DO MESMO TÍTULO (por nome base)
+#
+# Agrupa ROMs pelo título base (sem região, revisão, versão, idioma).
+# Exemplo: "Pokemon Ruby Version (USA).gba" e
+#          "Pokemon Ruby Version (USA) (Rev 2).gba" viram o mesmo grupo.
+#
+# Critério para eleger o vencedor (mesma lógica do Filtro 1G1R do Módulo 2):
+#   1. Menor penalidade de região  (USA=1 > World=2 > Europe=3 > Japan=4 > outros=5)
+#   2. Sem tag Beta/Proto/Demo     (penalidade +10)
+#   3. Em empate: nome mais curto  (= revisão mais simples)
+#   4. Em empate final: primeiro alfabeticamente
+#
+# O usuário vê uma prévia completa de cada grupo ANTES de qualquer ação:
+#   MANTER → o vencedor
+#   MOVER  → cada perdedor, com o motivo (região/revisão)
+# Só após confirmar os arquivos são movidos para <sistema>/versoes_antigas/
+# -----------------------------------------------------------------------------
+
+# Helper: extrai título base removendo todas as tags No-Intro
+_em_base_title() {
+    local fname="$1"
+    # Remove extensão
+    local base="${fname%.*}"
+    # Remove qualquer bloco ( ... ) ou [ ... ] e trailing spaces
+    base=$(echo "$base" | sed -E \
+        -e 's/ \([^)]*\)//g' \
+        -e 's/ \[[^]]*\]//g' \
+        -e 's/[[:space:]]+$//' \
+        -e 's/^[[:space:]]*//')
+    echo "$base"
+}
+
+# Helper: prioridade de região (menor = melhor)
+_em_region_priority() {
+    local fname="$1"
+    local penalty=0
+    echo "$fname" | grep -qiE '\((Beta|Proto|Demo|Sample|Preview)[^)]*\)' && penalty=10
+    if echo "$fname" | grep -qiE '\((USA|U)\)'; then
+        echo $(( 1 + penalty ))
+    elif echo "$fname" | grep -qiE '\(World\)'; then
+        echo $(( 2 + penalty ))
+    elif echo "$fname" | grep -qiE '\((Europe|EUR|E)\)'; then
+        echo $(( 3 + penalty ))
+    elif echo "$fname" | grep -qiE '\((Japan|JPN|J)\)'; then
+        echo $(( 4 + penalty ))
+    else
+        echo $(( 5 + penalty ))
+    fi
+}
+
+em_find_duplicates_by_name() {
+    local systems
+    mapfile -t systems < <(em_list_existing_systems)
+
+    if [ ${#systems[@]} -eq 0 ]; then
+        DIALOG_MSG "Versoes Multiplas" "Nenhum diretorio de sistema conhecido foi encontrado."
+        return
+    fi
+
+    # Escolha do sistema
+    local menu_items=()
+    local sys
+    for sys in "${systems[@]}"; do
+        menu_items+=("$sys" "$sys")
+    done
+    menu_items+=("TODOS" "Todos os sistemas")
+
+    local choice
+    choice=$(DIALOG_MENU "Versoes Multiplas" \
+        "Escolha o sistema para verificar:" "${menu_items[@]}")
+    [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+    local targets=()
+    [ "$choice" == "TODOS" ] && targets=("${systems[@]}") || targets=("$choice")
+
+    # -------------------------------------------------------------------------
+    # Passo 1: montar índice  título_base TAB caminho_completo
+    # -------------------------------------------------------------------------
+    local total_files=0
+    local sysname f
+    for sysname in "${targets[@]}"; do
+        while IFS= read -r -d '' f; do
+            local ext="${f##*.}"
+            em_is_rom_extension "$ext" && ((total_files++))
+        done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
+    done
+
+    if [ "$total_files" -eq 0 ]; then
+        DIALOG_MSG "Versoes Multiplas" "Nenhuma ROM encontrada."
+        return
+    fi
+
+    local title_index="${EM_TMP_DIR}/title_index.tsv"
+    local cancel_file="${EM_TMP_DIR}/byname_cancelled"
+    local count_file="${EM_TMP_DIR}/byname_count"
+    > "$title_index"
+    rm -f "$cancel_file"
+    echo 0 > "$count_file"
+    em_drain_tty_buffer
+
+    (
+    local count=0
+    for sysname in "${targets[@]}"; do
+        while IFS= read -r -d '' f; do
+            local ext="${f##*.}"
+            em_is_rom_extension "$ext" || continue
+
+            if em_check_cancel_key; then
+                echo "1" > "$cancel_file"
+                exit 0
+            fi
+
+            ((count++))
+            echo "$count" > "$count_file"
+            echo $(( count * 100 / total_files ))
+
+            local fname
+            fname=$(basename "$f")
+            local base_title
+            base_title=$(_em_base_title "$fname")
+            # Guarda: prioridade TAB título_base TAB caminho
+            local prio
+            prio=$(_em_region_priority "$fname")
+            printf '%d\t%s\t%s\n' "$prio" "$base_title" "$f" >> "$title_index"
+        done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
+    done
+    ) | DIALOG_GAUGE_CANCELABLE "Versoes Multiplas" \
+        "Analisando titulos das ROMs...\n\n(Aperte B/VOLTAR para cancelar)"
+
+    rm -f "$count_file"
+
+    if [ -f "$cancel_file" ]; then
+        rm -f "$cancel_file" "$title_index"
+        DIALOG_MSG "Versoes Multiplas" "Busca cancelada.\nNenhuma alteracao foi feita."
+        return
+    fi
+
+    # -------------------------------------------------------------------------
+    # Passo 2: agrupar por título base, eleger vencedor, gerar prévia detalhada
+    # -------------------------------------------------------------------------
+    local to_move_file="${EM_TMP_DIR}/byname_to_move.tsv"
+    > "$to_move_file"
+
+    local report="${EM_DATA_DIR}/versoes_multiplas_report.txt"
+    {
+        echo "Versoes Multiplas por Titulo - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Sistema(s): ${choice}"
+        echo "=========================================="
+    } > "$report"
+
+    # Prévia para o dialog — separada por grupo, máx 15 grupos exibidos
+    local preview=""
+    local dup_groups=0
+    local to_move_total=0
+    local preview_groups=0
+    local preview_max_groups=8   # grupos exibidos na tela (R36S é pequeno)
+
+    # Itera títulos únicos
+    local title
+    while IFS= read -r title; do
+        [ -z "$title" ] && continue
+
+        # Todos os arquivos deste título, ordenados por prioridade (melhor primeiro)
+        # Formato no índice: prio TAB base_title TAB caminho
+        local candidates
+        candidates=$(grep $'\t'"${title}"$'\t' "$title_index" \
+            | sort -t$'\t' -k1,1n -k3,3 \
+            | cut -f3)
+
+        local n
+        n=$(echo "$candidates" | grep -c .)
+        [ "$n" -le 1 ] && continue
+
+        ((dup_groups++))
+
+        # Vencedor = primeira linha (menor prio numérica = melhor)
+        local winner
+        winner=$(echo "$candidates" | head -n1)
+        local winner_name
+        winner_name=$(basename "$winner")
+        local winner_prio
+        winner_prio=$(_em_region_priority "$winner_name")
+        local winner_dir
+        winner_dir=$(dirname "$winner")
+        local dst_dir="${winner_dir}/versoes_antigas"
+
+        # Relatório
+        {
+            echo ""
+            echo "TITULO: ${title}"
+            echo "  MANTER : ${winner_name}"
+        } >> "$report"
+
+        # Acumula prévia do grupo (limitado a preview_max_groups grupos)
+        local group_preview=""
+        if [ "$preview_groups" -lt "$preview_max_groups" ]; then
+            group_preview+="[ ${title} ]\n"
+            group_preview+="  MANTER: ${winner_name}\n"
+        fi
+
+        # Perdedores
+        local loser_count=0
+        while IFS= read -r fpath; do
+            [ "$fpath" = "$winner" ] && continue
+            local lname
+            lname=$(basename "$fpath")
+            printf '%s\t%s\n' "$fpath" "$dst_dir" >> "$to_move_file"
+            echo "  MOVER  : ${lname}" >> "$report"
+            ((to_move_total++))
+            ((loser_count++))
+
+            if [ "$preview_groups" -lt "$preview_max_groups" ]; then
+                group_preview+="  MOVER : ${lname}\n"
+            fi
+        done <<< "$candidates"
+
+        if [ "$preview_groups" -lt "$preview_max_groups" ]; then
+            preview+="${group_preview}\n"
+            ((preview_groups++))
+        fi
+    done < <(cut -f2 "$title_index" | sort -u)
+
+    rm -f "$title_index"
+
+    # -------------------------------------------------------------------------
+    # Nenhum grupo encontrado
+    # -------------------------------------------------------------------------
+    if [ "$dup_groups" -eq 0 ]; then
+        DIALOG_MSG "Versoes Multiplas" \
+            "Nenhuma versao multipla encontrada.\n\nCada titulo tem apenas uma ROM no sistema."
+        rm -f "$to_move_file"
+        return
+    fi
+
+    # -------------------------------------------------------------------------
+    # Prévia + confirmação do usuário
+    # -------------------------------------------------------------------------
+    local overflow=""
+    [ "$dup_groups" -gt "$preview_max_groups" ] && \
+        overflow="... e mais $(( dup_groups - preview_max_groups )) grupo(s) nao exibido(s).\n\n"
+
+    local confirm
+    confirm=$(DIALOG_YESNO "Versoes Multiplas Encontradas" \
+        "Titulos com multiplas versoes: ${dup_groups}\nArquivos a mover: ${to_move_total}\n\nCriterio: melhor regiao (USA>World>Europe>Japan)\nSem Beta/Proto/Demo; em empate, nome mais curto.\n\nPREVIA (${preview_groups} de ${dup_groups} grupos):\n\n${preview}${overflow}Destino: <sistema>/versoes_antigas/\n\nDeseja mover os arquivos agora?")
+
+    if [ "$confirm" -ne 0 ]; then
+        DIALOG_MSG "Versoes Multiplas" \
+            "Operacao cancelada.\nNenhum arquivo foi movido.\n\nRelatorio completo salvo em:\n${report}"
+        rm -f "$to_move_file"
+        return
+    fi
+
+    # -------------------------------------------------------------------------
+    # Mover arquivos confirmados
+    # -------------------------------------------------------------------------
+    local moved=0
+    local move_errors=0
+    local total_to_move
+    total_to_move=$(wc -l < "$to_move_file")
+    local processed=0
+    em_drain_tty_buffer
+
+    (
+    local processed=0
+    while IFS=$'\t' read -r src dst_dir; do
+        ((processed++))
+        echo $(( processed * 100 / total_to_move ))
+
+        mkdir -p "$dst_dir"
+        chown ark:ark "$dst_dir" 2>/dev/null || true
+
+        local fname
+        fname=$(basename "$src")
+        local dst="${dst_dir}/${fname}"
+
+        # Trata conflito de nome no destino
+        if [ -e "$dst" ]; then
+            local base="${fname%.*}"
+            local ext="${fname##*.}"
+            local i=2
+            while [ -e "${dst_dir}/${base}_${i}.${ext}" ]; do ((i++)); done
+            dst="${dst_dir}/${base}_${i}.${ext}"
+        fi
+
+        if mv -- "$src" "$dst" 2>/dev/null; then
+            echo "[OK] ${fname}" >> "$report"
+            ((moved++))
+        else
+            echo "[ERRO] ${fname}" >> "$report"
+            ((move_errors++))
+        fi
+    done < "$to_move_file"
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+        --title "Versoes Multiplas" \
+        --gauge "Movendo versoes antigas para versoes_antigas/..." 8 60 0 \
+        > "$CURR_TTY" 2> "$CURR_TTY"
+
+    rm -f "$to_move_file"
+    chown ark:ark "$report" 2>/dev/null || true
+
+    local result="Titulos processados: ${dup_groups}\n"
+    result+="Arquivos movidos: ${moved}\n"
+    [ "$move_errors" -gt 0 ] && result+="Erros: ${move_errors}\n"
+    result+="\nArquivos movidos para:\n  <sistema>/versoes_antigas/\n"
+    result+="\nRelatorio completo:\n${report}"
+
+    DIALOG_MSG "Versoes Multiplas - Concluido" "$result"
+}
+
+# -----------------------------------------------------------------------------
+# Sub-menu da opção 6: escolha entre detecção por Hash ou por Nome
+# -----------------------------------------------------------------------------
+em_duplicates_menu() {
+    while true; do
+        local choice
+        choice=$(DIALOG_MENU "Detectar Duplicadas" \
+            "Escolha o tipo de deteccao:\n\n[Hash]  Mesmos bytes = duplicata exata\n[Nome]  Mesmo titulo, versoes diferentes" \
+            "1" "Por Hash (duplicatas exatas)" \
+            "2" "Por Nome (versoes multiplas do mesmo titulo)" \
+            "0" "VOLTAR")
+        [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+        case "$choice" in
+            1) em_find_duplicates ;;
+            2) em_find_duplicates_by_name ;;
+            0) return ;;
+        esac
+    done
+}
+
+# -----------------------------------------------------------------------------
 # 7. TAMANHO TOTAL OCUPADO POR SISTEMA
 # -----------------------------------------------------------------------------
 em_show_size_per_system() {
@@ -1185,7 +1544,7 @@ categoria_1() {
             "3" "Renomear via Banco de Dados (.dat)" \
             "4" "Compactar ROMs" \
             "5" "Descompactar ROMs" \
-            "6" "Detectar Duplicadas (Hash)" \
+            "6" "Detectar Duplicadas" \
             "7" "Tamanho Total por Sistema" \
             "8" "Estatisticas da Colecao" \
             "0" "VOLTAR")
@@ -1201,7 +1560,7 @@ categoria_1() {
             3) em_rename_database ;;
             4) em_compress_roms ;;
             5) em_decompress_roms ;;
-            6) em_find_duplicates ;;
+            6) em_duplicates_menu ;;
             7) em_show_size_per_system ;;
             8) em_show_collection_stats ;;
             0) return ;;

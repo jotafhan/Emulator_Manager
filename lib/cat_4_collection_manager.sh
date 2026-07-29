@@ -64,20 +64,8 @@ em4_is_save_extension() {
     return 1
 }
 
-# Detecta pendrives montados (mesmo helper do módulo 3)
-em4_find_usb_mounts() {
-    for base in /media /media/ark /mnt; do
-        [ -d "$base" ] || continue
-        while IFS= read -r -d '' mp; do
-            [ "$mp" = "$base" ] && continue
-            [ -w "$mp" ] && echo "$mp"
-        done < <(find "$base" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null)
-    done
-    while IFS=' ' read -r dev mount rest; do
-        echo "$dev" | grep -qE '^/dev/sd[b-z]|^/dev/usb' || continue
-        [ -w "$mount" ] && echo "$mount"
-    done < /proc/mounts 2>/dev/null
-}
+# Detecta pendrives — delegado para em_find_usb_mounts em core.sh
+em4_find_usb_mounts() { em_find_usb_mounts "$@"; }
 
 # Conta saves em /roms recursivamente
 em4_count_saves_in_roms() {

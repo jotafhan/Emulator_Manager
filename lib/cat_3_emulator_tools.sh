@@ -93,25 +93,8 @@ em3_backup_emulator() {
     tar -czf "$dest" --ignore-failed-read "${dirs[@]}" 2>/dev/null
 }
 
-# Detecta pendrives/dispositivos montados em /media ou /mnt
-# Retorna lista de pontos de montagem com espaço disponível
-em3_find_usb_mounts() {
-    local mount_point
-    # Verifica /media (automount) e /mnt (manual)
-    for base in /media /media/ark /mnt; do
-        [ -d "$base" ] || continue
-        while IFS= read -r -d '' mount_point; do
-            # Ignora a pasta base em si e pontos sem espaço gravável
-            [ "$mount_point" = "$base" ] && continue
-            [ -w "$mount_point" ] && echo "$mount_point"
-        done < <(find "$base" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null)
-    done
-    # Também verifica montagens ativas via /proc/mounts para dispositivos sd*/usb*
-    while IFS=' ' read -r dev mount rest; do
-        echo "$dev" | grep -qE '^/dev/sd[b-z]|^/dev/usb' || continue
-        [ -w "$mount" ] && echo "$mount"
-    done < /proc/mounts 2>/dev/null
-}
+# Detecta pendrives — delegado para em_find_usb_mounts em core.sh
+em3_find_usb_mounts() { em_find_usb_mounts "$@"; }
 
 # =============================================================================
 # 1. BACKUP CONFIGURAÇÃO — EMULADOR INDIVIDUAL

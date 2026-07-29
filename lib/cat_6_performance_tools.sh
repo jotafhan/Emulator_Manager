@@ -361,7 +361,6 @@ em6_ini_set() {
     local key="$3"
     local value="$4"
 
-    # Verifica se a chave já existe na seção
     # Usa python3 para manipulação segura de .ini
     python3 - "$file" "$section" "$key" "$value" <<'PYEOF' 2>/dev/null
 import sys
@@ -380,11 +379,9 @@ new_lines = []
 for line in lines:
     stripped = line.strip()
     if stripped.startswith('['):
-        if key_found is False and in_section and not key_found:
-            pass
         in_section = stripped.lower() == f'[{section.lower()}]'
-    if in_section and stripped.lower().startswith(key.lower() + ' =') or \
-       (in_section and stripped.lower().startswith(key.lower() + '=')):
+    if in_section and (stripped.lower().startswith(key.lower() + ' =') or
+                       stripped.lower().startswith(key.lower() + '=')):
         line = f'{key} = {value}\n'
         key_found = True
     new_lines.append(line)

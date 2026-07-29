@@ -228,47 +228,39 @@ em2_organize_by_region() {
         targets=("$choice")
     fi
 
-    # Prévia antes de mover
+    # Passagem 1: conta total real e gera prévia (primeiros 15 arquivos)
+    local total_real=0
     local preview=""
     local preview_count=0
-    local total_to_move=0
     local sysname f
     for sysname in "${targets[@]}"; do
         while IFS= read -r -d '' f; do
             local ext="${f##*.}"
             em_is_rom_extension "$ext" || continue
-            local fname
-            fname=$(basename "$f")
-            local region
-            region=$(em2_detect_region "$fname")
-            preview+="${fname}  →  ${region}/\n"
-            ((total_to_move++))
-            ((preview_count++))
-            [ "$preview_count" -ge 15 ] && break 2
+            ((total_real++))
+            if [ "$preview_count" -lt 15 ]; then
+                local fname
+                fname=$(basename "$f")
+                local region
+                region=$(em2_detect_region "$fname")
+                preview+="${fname}  →  ${region}/\n"
+                ((preview_count++))
+            fi
         done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
     done
 
-    [ "$total_to_move" -eq 0 ] && {
+    [ "$total_real" -eq 0 ] && {
         DIALOG_MSG "Organizar por Regiao" "Nenhuma ROM encontrada para organizar."
         return
     }
 
     local overflow=""
-    [ "$total_to_move" -ge 15 ] && overflow="\n... e mais arquivos."
+    [ "$total_real" -gt 15 ] && overflow="\n... e mais $(( total_real - 15 )) arquivo(s)."
 
     local confirm
     confirm=$(DIALOG_YESNO "Organizar por Regiao" \
-        "As ROMs serao movidas para subpastas por regiao:\n  USA/ Japan/ Europe/ World/ Outros/\n\n${preview}${overflow}\nTotal a mover: ${total_to_move}+\n\nDeseja continuar?")
+        "As ROMs serao movidas para subpastas por regiao:\n  USA/ Japan/ Europe/ World/ Outros/\n\n${preview}${overflow}\nTotal a mover: ${total_real}\n\nDeseja continuar?")
     [ "$confirm" -ne 0 ] && return
-
-    # Conta total real para gauge
-    local total_real=0
-    for sysname in "${targets[@]}"; do
-        while IFS= read -r -d '' f; do
-            local ext="${f##*.}"
-            em_is_rom_extension "$ext" && ((total_real++))
-        done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
-    done
 
     local moved_file="${EM_TMP_DIR}/region_moved"
     local errors_file="${EM_TMP_DIR}/region_errors"
@@ -346,7 +338,7 @@ with open(idx_path, 'w', encoding='utf-8') as out:
 
         # CRC pode estar dentro de rom ( crc XXXXXXXX ) ou direto
         crc = None
-        rom_m = re.search(r'rom\s*\([^)]*crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE)
+        rom_m = re.search(r'^\s*rom\s*\(.*?crc\s+([0-9A-Fa-f]{8})', body, re.IGNORECASE | re.MULTILINE)
         if rom_m:
             crc = rom_m.group(1).lower()
         else:
@@ -454,9 +446,24 @@ em2_organize_by_genre() {
         "Arquivo .dat encontrado:\n\n$(basename "$auto_dat")\n\nUsar este arquivo para organizar por genero?")
     [ "$confirm" -ne 0 ] && return
 
-    # Constrói ou reutiliza índice CRC32->genero
+    # Constrói ou reutiliza índice CRC32->genero.
+    # O índice é regenerado se: não existe, o .dat é mais novo, ou o índice
+    # está vazio (pode ter sido gerado com a versão antiga com bug de regex).
     local index_file="${dats_dir}/${chosen_sys}_genre_index.tsv"
-    if [ ! -f "$index_file" ] || [ "$auto_dat" -nt "$index_file" ]; then
+    local needs_rebuild=0
+    [ ! -f "$index_file" ]         && needs_rebuild=1
+    [ "$auto_dat" -nt "$index_file" ] && needs_rebuild=1
+    [ ! -s "$index_file" ]         && needs_rebuild=1
+    # Verifica integridade mínima: se o índice tem menos de 10 entradas
+    # (sinal de que foi gerado com o bug de regex), reconstrói.
+    if [ "$needs_rebuild" -eq 0 ]; then
+        local line_count
+        line_count=$(wc -l < "$index_file" 2>/dev/null || echo 0)
+        [ "$line_count" -lt 10 ] && needs_rebuild=1
+    fi
+
+    if [ "$needs_rebuild" -eq 1 ]; then
+        rm -f "$index_file"
         DIALOG_MSG "Indexando .dat" "Processando arquivo .dat...\nIsso leva alguns segundos na primeira vez."
         local entry_count
         entry_count=$(em2_build_genre_index "$auto_dat" "$index_file")
