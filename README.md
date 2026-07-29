@@ -6,6 +6,35 @@ Ferramenta modular de gerenciamento de emuladores e ROMs para handhelds retro, c
 
 ## Versão atual: 6.2.0
 
+### Changelog
+
+#### v6.2.0
+- **[cat_1]** Detecção de duplicatas separada em sub-menu com duas modalidades:
+  - **Por Hash** — duplicatas exatas (comportamento anterior)
+  - **Por Nome** — versões múltiplas do mesmo título (ex: múltiplos Pokémon Ruby), com prévia completa por grupo antes de qualquer ação
+- **[cat_1 / cat_2]** Corrigido bug crítico de regex no parser ClrMamePro: `[^)]*` interrompida por parênteses no nome do jogo (ex: `(Japan)`) impedia o CRC de ser lido — todas as ROMs iam para `Outros/` na organização por gênero e falhavam na renomeação via .dat
+- **[cat_1 / cat_2]** Índice `.tsv` cacheado com dados corrompidos é detectado e regenerado automaticamente (menos de 10 entradas = rebuild forçado)
+- **[cat_1]** Corrigida precedência `||`/`&&` no filtro de extensão de `em_compress_roms` (zip/7z nunca eram pulados corretamente)
+- **[cat_1]** `echo -e` substituído por `printf '%b'` em `em_scan_new_roms`
+- **[cat_1]** Contador `count` em `em_find_duplicates` movido para arquivo tmp para cruzar corretamente o subshell
+- **[cat_1]** `EM_DAT_KEYWORDS["gb"]` corrigido (apontava para keywords de GBC)
+- **[cat_1 / cat_2]** `EM_DAT_KEYWORDS` e `em_dat_matches_system` movidos para escopo global — `em2_organize_by_genre` não depende mais de `em_rename_database` ter sido executada antes
+- **[cat_2]** `em2_organize_by_region` agora exibe o total real de arquivos (antes parava a contagem em 15)
+- **[cat_3 / cat_4]** `em3_find_usb_mounts` e `em4_find_usb_mounts` unificadas em `em_find_usb_mounts` no `core.sh`
+- **[cat_5]** Corrigido bug de reversão de backup: separador trocado de `_` para `@` no nome dos `.bak` — underscores em nomes de arquivo não causam mais paths errados ao reverter
+- **[cat_6]** Removido código morto e condição redundante em `em6_ini_set` (Python)
+
+#### v6.1.0
+- Módulo 6 (Atualizar Emulator Manager) implementado
+- Módulo 5 (Ferramentas de Performance) implementado
+
+### Regras de versionamento
+| Tipo de alteração | Incremento |
+|---|---|
+| Alteração em opção existente | `+0.0.1` |
+| Nova opção dentro de um módulo | `+0.1.0` |
+| Novo módulo | versão = número de módulos (ex: 7 módulos → `7.0.0`) |
+
 ---
 
 ## Compatibilidade
