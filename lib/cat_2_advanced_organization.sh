@@ -1560,141 +1560,228 @@ em2_check_zero_size() {
 
 # --- 10c. ROM na pasta de sistema errado ---
 # Cruza a extensão do arquivo com as extensões esperadas para cada sistema.
-# Após listar, oferece opção de mover para a pasta correta.
+# Varre apenas o nível raiz de cada pasta de sistema (maxdepth 1) —
+# evita travar o device em coleções grandes com subpastas profundas.
 em2_check_wrong_system() {
-    # Mapa: extensão → sistema esperado
-    declare -A EXT_TO_SYS=(
-        [gba]="gba"   [gb]="gb"     [gbc]="gbc"
-        [nes]="nes"   [sfc]="snes"  [smc]="snes"
-        [n64]="n64"   [z64]="n64"
-        [md]="megadrive" [gen]="megadrive"
-        [sms]="mastersystem" [gg]="gamegear"
-        [32x]="sega32x"
-        [nds]="nds"   [pbp]="psp"
-    )
+    # Mapa: extensão → sistema esperado (extensões únicas/não ambíguas)
+    # Extensões ambíguas como bin/iso/zip/7z/chd/cue são ignoradas intencionalmente.
+    declare -A EXT_TO_SYS
+    EXT_TO_SYS[gba]="gba"
+    EXT_TO_SYS[gb]="gb"
+    EXT_TO_SYS[gbc]="gbc"
+    EXT_TO_SYS[nes]="nes"
+    EXT_TO_SYS[fds]="nes"
+    EXT_TO_SYS[sfc]="snes"
+    EXT_TO_SYS[smc]="snes"
+    EXT_TO_SYS[n64]="n64"
+    EXT_TO_SYS[z64]="n64"
+    EXT_TO_SYS[v64]="n64"
+    EXT_TO_SYS[md]="megadrive"
+    EXT_TO_SYS[gen]="megadrive"
+    EXT_TO_SYS[smd]="megadrive"
+    EXT_TO_SYS[sms]="mastersystem"
+    EXT_TO_SYS[gg]="gamegear"
+    EXT_TO_SYS[32x]="sega32x"
+    EXT_TO_SYS[nds]="nds"
+    EXT_TO_SYS[pbp]="psp"
+    EXT_TO_SYS[lnx]="atarilynx"
+    EXT_TO_SYS[a26]="atari2600"
+    EXT_TO_SYS[pce]="pcengine"
+    EXT_TO_SYS[ngp]="neogeo"
+    EXT_TO_SYS[ngc]="neogeo"
 
-    # Pastas dentro de /roms/ que devem ser ignoradas na verificação
-    local SKIP_FOLDERS=("bios" "ports" "themes" "tools" "backup" "duplicatas" "descartados" "hacks" "nao_licenciados")
+    # Sistemas conhecidos a varrer
+    local systems
+    mapfile -t systems < <(em_list_existing_systems)
 
-    # Conta total de arquivos em /roms/ para gauge (excluindo pastas ignoradas)
-    local total_files=0
-    local f
-    while IFS= read -r -d '' f; do
-        # Verifica se o arquivo está dentro de uma pasta ignorada
-        local rel="${f#${ROMS_BASE_DIR}/}"
-        local top_folder; top_folder=$(echo "$rel" | cut -d'/' -f1)
-        local skip=0
-        for skip_dir in "${SKIP_FOLDERS[@]}"; do
-            [ "$top_folder" = "$skip_dir" ] && skip=1 && break
-        done
-        [ "$skip" -eq 0 ] && ((total_files++))
-    done < <(find "${ROMS_BASE_DIR}" -type f -print0 2>/dev/null)
-
-    if [ "$total_files" -eq 0 ]; then
-        DIALOG_MSG "Sistema Errado" "Nenhum arquivo encontrado em ${ROMS_BASE_DIR}."
+    if [ "${#systems[@]}" -eq 0 ]; then
+        DIALOG_MSG "Sistema Errado" "Nenhum diretorio de sistema encontrado em ${ROMS_BASE_DIR}."
         return
     fi
 
-    local wrong_file="${EM_TMP_DIR}/wrong_system.tsv"
-    local report="${EM_DATA_DIR}/wrong_system_report.txt"
-    > "$wrong_file"
-    echo "ROMs em sistema errado - $(date '+%Y-%m-%d %H:%M:%S')" > "$report"
-    echo "Varredura em: ${ROMS_BASE_DIR} (recursiva)" >> "$report"
-    echo "" >> "$report"
+    # -------------------------------------------------------------------------
+    # Passagem única: varre raiz de cada sistema (maxdepth 1) com gauge
+    # Também verifica arquivos soltos na raiz de /roms (fora de qualquer sistema)
+    # Conta total primeiro para porcentagem real
+    # -------------------------------------------------------------------------
+    local total_files=0
+    local sys f
 
-    local found_file="${EM_TMP_DIR}/wrong_found"
-    echo 0 > "$found_file"
+    # Arquivos soltos na raiz de /roms
+    while IFS= read -r -d '' f; do
+        local ext="${f##*.}"
+        ext="${ext,,}"
+        [ -n "${EXT_TO_SYS[$ext]:-}" ] && ((total_files++))
+    done < <(find "${ROMS_BASE_DIR}" -maxdepth 1 -type f -print0 2>/dev/null)
+
+    # Arquivos na raiz de cada sistema
+    for sys in "${systems[@]}"; do
+        while IFS= read -r -d '' f; do
+            local ext="${f##*.}"
+            ext="${ext,,}"
+            [ -n "${EXT_TO_SYS[$ext]:-}" ] && ((total_files++))
+        done < <(find "${ROMS_BASE_DIR}/${sys}" -maxdepth 1 -type f -print0 2>/dev/null)
+    done
+
+    if [ "$total_files" -eq 0 ]; then
+        DIALOG_MSG "Sistema Errado" \
+            "Nenhum arquivo com extensao mapeada encontrado.\n\nSo extensoes unicas sao verificadas (gba, gb, nes, sfc, etc).\nArquivos .zip .bin .iso sao ignorados por serem ambiguos."
+        return
+    fi
+
+    local wrong_movable="${EM_TMP_DIR}/wrong_movable.tsv"
+    local wrong_missing="${EM_TMP_DIR}/wrong_missing.tsv"
+    local report="${EM_DATA_DIR}/wrong_system_report.txt"
+    local found_movable_file="${EM_TMP_DIR}/wrong_found_mov"
+    local found_missing_file="${EM_TMP_DIR}/wrong_found_mis"
+
+    > "$wrong_movable"
+    > "$wrong_missing"
+    echo 0 > "$found_movable_file"
+    echo 0 > "$found_missing_file"
+
+    {
+        echo "ROMs em sistema errado - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Verificados: raiz de /roms + raiz de cada sistema (maxdepth 1)"
+        echo ""
+    } > "$report"
+
     em_drain_tty_buffer
 
     (
-    local processed=0
-    while IFS= read -r -d '' f; do
-        # Verifica se está numa pasta ignorada
-        local rel="${f#${ROMS_BASE_DIR}/}"
-        local top_folder; top_folder=$(echo "$rel" | cut -d'/' -f1)
-        local skip=0
-        for skip_dir in "${SKIP_FOLDERS[@]}"; do
-            [ "$top_folder" = "$skip_dir" ] && skip=1 && break
-        done
-        [ "$skip" -eq 1 ] && continue
+    local processed=0 found_mov=0 found_mis=0
 
-        ((processed++))
-        [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
+    # Função interna: processa um arquivo e classifica
+    _check_file() {
+        local f="$1"
+        local current_sys="$2"   # "." para arquivos na raiz de /roms
 
         local ext="${f##*.}"
         ext="${ext,,}"
         local expected="${EXT_TO_SYS[$ext]:-}"
-        # Extensão ambígua (bin, iso, zip...) ou não mapeada — pula
-        [ -z "$expected" ] && continue
+        [ -z "$expected" ] && return
 
-        # Determina a pasta atual do arquivo em relação a /roms/
-        local rel_path="${f#${ROMS_BASE_DIR}/}"
-        local current_folder
-        current_folder=$(echo "$rel_path" | cut -d'/' -f1)
+        ((processed++))
+        [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
 
-        # Está na pasta correta — pula
-        [ "$current_folder" = "$expected" ] && continue
+        # Já está na pasta correta
+        [ "$current_sys" = "$expected" ] && return
 
-        # Pasta de destino deve existir no device
-        [ ! -d "${ROMS_BASE_DIR}/${expected}" ] && continue
+        local fname
+        fname=$(basename "$f")
+        local origem
+        [ "$current_sys" = "." ] && origem="(raiz de /roms)" || origem="${current_sys}/"
 
-        # Registra para mover
-        printf '%s\t%s\n' "$f" "$expected" >> "$wrong_file"
-        printf 'ATUAL: %s  ESPERADO: %s/  ARQUIVO: %s\n' \
-            "$current_folder" "$expected" "$(basename "$f")" >> "$report"
+        if [ -d "${ROMS_BASE_DIR}/${expected}" ]; then
+            printf '%s\t%s\n' "$f" "$expected" >> "$wrong_movable"
+            printf '[MOVER] %s → %s/  (estava em: %s)\n' \
+                "$fname" "$expected" "$origem" >> "$report"
+            ((found_mov++))
+            echo "$found_mov" > "$found_movable_file"
+        else
+            printf '%s\t%s\n' "$f" "$expected" >> "$wrong_missing"
+            printf '[SEM PASTA] %s → %s/ nao existe  (estava em: %s)\n' \
+                "$fname" "$expected" "$origem" >> "$report"
+            ((found_mis++))
+            echo "$found_mis" > "$found_missing_file"
+        fi
+    }
 
-        local n; n=$(cat "$found_file")
-        echo $(( n + 1 )) > "$found_file"
-    done < <(find "${ROMS_BASE_DIR}" -type f -print0 2>/dev/null)
+    # Verifica arquivos soltos na raiz de /roms
+    while IFS= read -r -d '' f; do
+        _check_file "$f" "."
+    done < <(find "${ROMS_BASE_DIR}" -maxdepth 1 -type f -print0 2>/dev/null)
+
+    # Verifica raiz de cada sistema
+    for sys in "${systems[@]}"; do
+        while IFS= read -r -d '' f; do
+            _check_file "$f" "$sys"
+        done < <(find "${ROMS_BASE_DIR}/${sys}" -maxdepth 1 -type f -print0 2>/dev/null)
+    done
     ) | dialog --backtitle "$DIALOG_BACKTITLE" \
-        --title "Verificar Sistema Errado" \
-        --gauge "Varrendo ${ROMS_BASE_DIR} recursivamente...\n(Ignorando: bios/ ports/ themes/ tools/)" 9 60 0 \
+        --title "ROM na pasta errada" \
+        --gauge "Verificando extensoes em cada sistema...\nIsso leva apenas alguns segundos." 8 60 0 \
         > "$CURR_TTY" 2> "$CURR_TTY"
 
-    local found
-    found=$(cat "$found_file" 2>/dev/null || echo 0)
-    rm -f "$found_file"
+    local found_movable found_missing
+    found_movable=$(cat "$found_movable_file" 2>/dev/null || echo 0)
+    found_missing=$(cat "$found_missing_file" 2>/dev/null || echo 0)
+    local total_found=$(( found_movable + found_missing ))
+    rm -f "$found_movable_file" "$found_missing_file"
     chown ark:ark "$report" 2>/dev/null || true
 
-    if [ "$found" -eq 0 ]; then
+    # -------------------------------------------------------------------------
+    # Nenhuma ROM fora do lugar
+    # -------------------------------------------------------------------------
+    if [ "$total_found" -eq 0 ]; then
         DIALOG_MSG "Sistema Errado" \
-            "Nenhuma ROM encontrada fora da pasta correta.\n\nArquivos verificados: ${total_files}"
-        rm -f "$wrong_file"
+            "Nenhuma ROM encontrada fora da pasta correta.\n\nArquivos verificados: ${total_files}\nSistemas verificados: ${#systems[@]}"
+        rm -f "$wrong_movable" "$wrong_missing"
         return
     fi
 
-    # Monta prévia das primeiras 12 entradas
+    # -------------------------------------------------------------------------
+    # Prévia separada por grupo
+    # -------------------------------------------------------------------------
     local preview=""
-    local shown=0
-    while IFS=$'\t' read -r fpath expected; do
-        local rel="${fpath#${ROMS_BASE_DIR}/}"
-        local current_folder; current_folder=$(echo "$rel" | cut -d'/' -f1)
-        local fname; fname=$(basename "$fpath")
-        preview+="${fname}\n  ${current_folder}/ → ${expected}/\n\n"
-        ((shown++))
-        [ "$shown" -ge 12 ] && break
-    done < "$wrong_file"
-    local overflow=""
-    [ "$found" -gt 12 ] && overflow="... e mais $(( found - 12 )) arquivo(s).\n\n"
 
-    # Pergunta se quer mover
+    if [ "$found_movable" -gt 0 ]; then
+        preview+="-- Podem ser movidas (${found_movable}) --\n"
+        local shown=0
+        while IFS=$'\t' read -r fpath expected; do
+            local fname; fname=$(basename "$fpath")
+            local cur; cur=$(basename "$(dirname "$fpath")")
+            preview+="${fname}\n  ${cur}/ → ${expected}/\n\n"
+            ((shown++))
+            [ "$shown" -ge 10 ] && break
+        done < "$wrong_movable"
+        [ "$found_movable" -gt 10 ] && \
+            preview+="... e mais $(( found_movable - 10 )) arquivo(s).\n\n"
+    fi
+
+    if [ "$found_missing" -gt 0 ]; then
+        preview+="-- Pasta destino nao existe (${found_missing}) --\n"
+        local shown_mis=0
+        while IFS=$'\t' read -r fpath expected; do
+            local fname; fname=$(basename "$fpath")
+            preview+="${fname}  →  ${expected}/ (nao existe)\n"
+            ((shown_mis++))
+            [ "$shown_mis" -ge 5 ] && break
+        done < "$wrong_missing"
+        [ "$found_missing" -gt 5 ] && \
+            preview+="... e mais $(( found_missing - 5 )) arquivo(s).\n"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Confirmação
+    # -------------------------------------------------------------------------
+    if [ "$found_movable" -eq 0 ]; then
+        DIALOG_MSG "Sistema Errado" \
+            "ROMs fora da pasta correta: ${total_found}\nNenhuma pode ser movida (pasta destino nao existe no device).\n\n${preview}\nRelatorio salvo em:\n${report}"
+        rm -f "$wrong_movable" "$wrong_missing"
+        return
+    fi
+
     local confirm
     confirm=$(DIALOG_YESNO "ROMs em pasta errada" \
-        "ROMs encontradas fora da pasta correta: ${found}\n\n${preview}${overflow}Deseja mover as ROMs para as pastas corretas agora?")
+        "ROMs fora da pasta correta: ${total_found}\nPode mover: ${found_movable}  |  Sem pasta destino: ${found_missing}\n\n${preview}\nDeseja mover as ${found_movable} ROMs agora?")
 
     if [ "$confirm" -ne 0 ]; then
         DIALOG_MSG "Sistema Errado" \
             "Nenhum arquivo foi movido.\n\nRelatorio salvo em:\n${report}"
-        rm -f "$wrong_file"
+        rm -f "$wrong_movable" "$wrong_missing"
         return
     fi
 
-    # Move com gauge de progresso
+    # -------------------------------------------------------------------------
+    # Move os arquivos confirmados
+    # -------------------------------------------------------------------------
     local total_to_move
-    total_to_move=$(wc -l < "$wrong_file")
+    total_to_move=$(wc -l < "$wrong_movable")
     local moved_file="${EM_TMP_DIR}/wrong_moved"
     local errors_file="${EM_TMP_DIR}/wrong_errors"
-    echo 0 > "$moved_file"; echo 0 > "$errors_file"
+    echo 0 > "$moved_file"
+    echo 0 > "$errors_file"
     em_drain_tty_buffer
 
     (
@@ -1702,6 +1789,7 @@ em2_check_wrong_system() {
     while IFS=$'\t' read -r fpath expected; do
         ((processed++))
         [ "$total_to_move" -gt 0 ] && echo $(( processed * 100 / total_to_move ))
+
         local dest_dir="${ROMS_BASE_DIR}/${expected}"
         local fname; fname=$(basename "$fpath")
         local dest="${dest_dir}/${fname}"
@@ -1715,13 +1803,13 @@ em2_check_wrong_system() {
         fi
 
         if mv -- "$fpath" "$dest" 2>/dev/null; then
-            echo "[MOVIDO] $(basename "$fpath") → ${expected}/" >> "$report"
+            echo "[MOVIDO] ${fname} → ${expected}/" >> "$report"
             ((moved++)); echo "$moved" > "$moved_file"
         else
-            echo "[ERRO] $(basename "$fpath")" >> "$report"
+            echo "[ERRO] ${fname}" >> "$report"
             ((errors++)); echo "$errors" > "$errors_file"
         fi
-    done < "$wrong_file"
+    done < "$wrong_movable"
     ) | dialog --backtitle "$DIALOG_BACKTITLE" \
         --title "Sistema Errado" \
         --gauge "Movendo ROMs para as pastas corretas..." 8 60 0 \
@@ -1730,12 +1818,15 @@ em2_check_wrong_system() {
     local moved errors
     moved=$(cat "$moved_file" 2>/dev/null || echo 0)
     errors=$(cat "$errors_file" 2>/dev/null || echo 0)
-    rm -f "$wrong_file" "$moved_file" "$errors_file"
+    rm -f "$wrong_movable" "$wrong_missing" "$moved_file" "$errors_file"
     chown ark:ark "$report" 2>/dev/null || true
 
-    local result="ROMs movidas para pasta correta: ${moved}"
-    [ "$errors" -gt 0 ] && result+="\nErros: ${errors}"
-    result+="\n\nRelatorio salvo em:\n${report}"
+    local result="ROMs movidas para pasta correta: ${moved}\n"
+    [ "$found_missing" -gt 0 ] && \
+        result+="Sem pasta destino (nao movidas): ${found_missing}\n"
+    [ "$errors" -gt 0 ] && \
+        result+="Erros: ${errors}\n"
+    result+="\nRelatorio salvo em:\n${report}"
     DIALOG_MSG "Sistema Errado - Concluido" "$result"
 }
 
