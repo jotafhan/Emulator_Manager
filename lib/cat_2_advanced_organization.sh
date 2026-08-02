@@ -1206,6 +1206,12 @@ em2_title_case_roms() {
 
 # =============================================================================
 # 8. EXPORTAR LISTA DE ROMS
+# Formatos:
+#   TXT — uma ROM por linha (com subpasta relativa se incluir subpastas)
+#   CSV — sistema,subpasta,nome,tamanho_bytes,regiao,crc32
+# Opções:
+#   - Incluir ou não subpastas (ex: duplicatas/, versoes_antigas/, USA/, etc.)
+#   - Incluir ou não CRC32 (apenas CSV; calcula via python3 — mais lento)
 # =============================================================================
 em2_export_list() {
     local systems
@@ -1225,30 +1231,57 @@ em2_export_list() {
     local targets=()
     [ "$choice" == "TODOS" ] && targets=("${systems[@]}") || targets=("$choice")
 
+    # --- Formato ---
     local fmt
     fmt=$(DIALOG_MENU "Formato" "Escolha o formato de exportacao:" \
         "1" "TXT - uma ROM por linha" \
-        "2" "CSV - sistema,nome,tamanho,regiao")
+        "2" "CSV - sistema,subpasta,nome,tamanho,regiao" \
+        "3" "CSV com CRC32 (mais lento)")
     [ "$(NORM_RET $?)" == "VOLTAR" ] && return
 
-    local timestamp
-    timestamp=$(date '+%Y%m%d_%H%M%S')
-    local outfile
+    # CRC32 requer python3
+    if [ "$fmt" == "3" ] && ! em_has_tool python3; then
+        DIALOG_MSG "Exportar Lista" \
+            "python3 nao encontrado.\n\nO formato CSV com CRC32 requer python3.\nUse o formato CSV simples (opcao 2)."
+        return
+    fi
 
-    # Conta total para gauge
+    # --- Incluir subpastas? ---
+    local include_sub
+    include_sub=$(DIALOG_MENU "Subpastas" \
+        "Incluir ROMs dentro de subpastas?\n(duplicatas/, versoes_antigas/, USA/, hacks/, etc.)" \
+        "1" "Apenas a raiz de cada sistema" \
+        "2" "Raiz + todas as subpastas")
+    [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+    local find_depth=""
+    [ "$include_sub" == "1" ] && find_depth="-maxdepth 1"
+
+    # --- Conta total para gauge ---
     local total_roms=0
     local sysname f
     for sysname in "${targets[@]}"; do
         while IFS= read -r -d '' f; do
             local ext="${f##*.}"
             em_is_rom_extension "$ext" && ((total_roms++))
-        done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null)
+        done < <(find "${ROMS_BASE_DIR}/${sysname}" $find_depth -type f -print0 2>/dev/null)
     done
 
+    if [ "$total_roms" -eq 0 ]; then
+        DIALOG_MSG "Exportar Lista" "Nenhuma ROM encontrada."
+        return
+    fi
+
+    local timestamp
+    timestamp=$(date '+%Y%m%d_%H%M%S')
+    local outfile
     local count_file="${EM_TMP_DIR}/export_count"
     echo 0 > "$count_file"
     em_drain_tty_buffer
 
+    # -------------------------------------------------------------------------
+    # Formato TXT
+    # -------------------------------------------------------------------------
     if [ "$fmt" == "1" ]; then
         outfile="${EM_DATA_DIR}/rom_list_${timestamp}.txt"
         > "$outfile"
@@ -1259,37 +1292,111 @@ em2_export_list() {
             while IFS= read -r -d '' f; do
                 local ext="${f##*.}"
                 em_is_rom_extension "$ext" || continue
-                basename "$f" >> "$outfile"
+                # Caminho relativo a partir da pasta do sistema
+                local rel="${f#${ROMS_BASE_DIR}/${sysname}/}"
+                echo "$rel" >> "$outfile"
                 ((processed++))
                 [ "$total_roms" -gt 0 ] && echo $(( processed * 100 / total_roms ))
                 echo "$processed" > "$count_file"
-            done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null | sort -z)
+            done < <(find "${ROMS_BASE_DIR}/${sysname}" $find_depth -type f -print0 2>/dev/null | sort -z)
             echo "" >> "$outfile"
         done
         ) | dialog --backtitle "$DIALOG_BACKTITLE" --title "Exportar Lista" \
             --gauge "Gerando lista TXT..." 8 60 0 \
             > "$CURR_TTY" 2> "$CURR_TTY"
-    else
+
+    # -------------------------------------------------------------------------
+    # Formato CSV simples
+    # -------------------------------------------------------------------------
+    elif [ "$fmt" == "2" ]; then
         outfile="${EM_DATA_DIR}/rom_list_${timestamp}.csv"
-        echo "sistema,nome,tamanho_bytes,regiao" > "$outfile"
+        echo "sistema,subpasta,nome,tamanho_bytes,regiao" > "$outfile"
         (
         local processed=0
         for sysname in "${targets[@]}"; do
             while IFS= read -r -d '' f; do
                 local ext="${f##*.}"
                 em_is_rom_extension "$ext" || continue
-                local fname size region
+                local fname size region subpasta
                 fname=$(basename "$f")
                 size=$(stat -c%s "$f" 2>/dev/null || echo 0)
                 region=$(em2_detect_region "$fname")
-                printf '%s,%s,%s,%s\n' "$sysname" "$fname" "$size" "$region" >> "$outfile"
+                # Subpasta relativa (vazio se estiver na raiz do sistema)
+                local rel="${f#${ROMS_BASE_DIR}/${sysname}/}"
+                local rel_dir
+                rel_dir=$(dirname "$rel")
+                [ "$rel_dir" = "." ] && subpasta="" || subpasta="$rel_dir"
+                printf '%s,%s,%s,%s,%s\n' \
+                    "$sysname" "$subpasta" "$fname" "$size" "$region" >> "$outfile"
                 ((processed++))
                 [ "$total_roms" -gt 0 ] && echo $(( processed * 100 / total_roms ))
                 echo "$processed" > "$count_file"
-            done < <(find "${ROMS_BASE_DIR}/${sysname}" -maxdepth 1 -type f -print0 2>/dev/null | sort -z)
+            done < <(find "${ROMS_BASE_DIR}/${sysname}" $find_depth -type f -print0 2>/dev/null | sort -z)
         done
         ) | dialog --backtitle "$DIALOG_BACKTITLE" --title "Exportar Lista" \
             --gauge "Gerando lista CSV..." 8 60 0 \
+            > "$CURR_TTY" 2> "$CURR_TTY"
+
+    # -------------------------------------------------------------------------
+    # Formato CSV com CRC32
+    # -------------------------------------------------------------------------
+    else
+        outfile="${EM_DATA_DIR}/rom_list_${timestamp}.csv"
+        echo "sistema,subpasta,nome,tamanho_bytes,regiao,crc32" > "$outfile"
+        (
+        local processed=0
+        for sysname in "${targets[@]}"; do
+            while IFS= read -r -d '' f; do
+                local ext="${f##*.}"
+                em_is_rom_extension "$ext" || continue
+                local fname size region subpasta crc
+                fname=$(basename "$f")
+                size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                region=$(em2_detect_region "$fname")
+                local rel="${f#${ROMS_BASE_DIR}/${sysname}/}"
+                local rel_dir
+                rel_dir=$(dirname "$rel")
+                [ "$rel_dir" = "." ] && subpasta="" || subpasta="$rel_dir"
+
+                # CRC32 via python3 (mesmo método do cat_1)
+                ext_lower="${ext,,}"
+                if [ "$ext_lower" = "zip" ]; then
+                    crc=$(python3 - "$f" <<'PYEOF' 2>/dev/null
+import sys, zipfile
+try:
+    with zipfile.ZipFile(sys.argv[1]) as z:
+        infos = [i for i in z.infolist() if not i.filename.endswith('/')]
+        if infos:
+            print(format(infos[0].CRC & 0xFFFFFFFF, '08x'))
+except Exception:
+    pass
+PYEOF
+)
+                else
+                    crc=$(python3 - "$f" <<'PYEOF' 2>/dev/null
+import sys, zlib
+crc = 0
+try:
+    with open(sys.argv[1], 'rb') as f:
+        while chunk := f.read(65536):
+            crc = zlib.crc32(chunk, crc)
+    print(format(crc & 0xFFFFFFFF, '08x'))
+except Exception:
+    pass
+PYEOF
+)
+                fi
+                [ -z "$crc" ] && crc="erro"
+
+                printf '%s,%s,%s,%s,%s,%s\n' \
+                    "$sysname" "$subpasta" "$fname" "$size" "$region" "$crc" >> "$outfile"
+                ((processed++))
+                [ "$total_roms" -gt 0 ] && echo $(( processed * 100 / total_roms ))
+                echo "$processed" > "$count_file"
+            done < <(find "${ROMS_BASE_DIR}/${sysname}" $find_depth -type f -print0 2>/dev/null | sort -z)
+        done
+        ) | dialog --backtitle "$DIALOG_BACKTITLE" --title "Exportar Lista" \
+            --gauge "Gerando lista CSV com CRC32...\nIsso pode levar varios minutos." 8 60 0 \
             > "$CURR_TTY" 2> "$CURR_TTY"
     fi
 
@@ -1297,8 +1404,12 @@ em2_export_list() {
     total=$(cat "$count_file" 2>/dev/null || echo "?")
     rm -f "$count_file"
     chown ark:ark "$outfile" 2>/dev/null || true
+
+    local sub_info
+    [ "$include_sub" == "2" ] && sub_info="Raiz + subpastas" || sub_info="Apenas raiz"
+
     DIALOG_MSG "Exportar Lista" \
-        "Lista exportada com sucesso.\n\nArquivo gerado:\n${outfile}\n\nROMs exportadas: ${total}"
+        "Lista exportada com sucesso.\n\nArquivo:\n${outfile}\n\nROMs exportadas: ${total}\nEscopo: ${sub_info}"
 }
 
 # =============================================================================
