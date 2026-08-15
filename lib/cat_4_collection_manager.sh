@@ -451,11 +451,19 @@ em4_export_collection() {
     mapfile -t systems < <(em_list_existing_systems)
     local menu_items=()
     local sys
+
+    # Adiciona ports no topo se a pasta existir
+    local ports_dir="${ROMS_BASE_DIR}/ports"
+    if [ -d "$ports_dir" ]; then
+        local ports_size; ports_size=$(em4_dir_size "$ports_dir")
+        menu_items+=("ports" "ports  (${ports_size})")
+    fi
+
     for sys in "${systems[@]}"; do
         local size; size=$(em4_dir_size "${ROMS_BASE_DIR}/${sys}")
         menu_items+=("$sys" "${sys}  (${size})")
     done
-    menu_items+=("TODOS" "Exportar todos os sistemas")
+    menu_items+=("TODOS" "Exportar todos os sistemas + ports")
 
     local choice
     choice=$(DIALOG_MENU "Exportar Colecao" \
@@ -475,15 +483,28 @@ em4_export_collection() {
         "Escolha o pendrive de destino:" "${usb_menu[@]}")
     [ "$(NORM_RET $?)" == "VOLTAR" ] && return
 
-    # Verifica espaço disponível
+    # Monta lista de targets — inclui ports quando TODOS ou quando escolhido
     local targets=()
-    [ "$choice" == "TODOS" ] && targets=("${systems[@]}") || targets=("$choice")
+    local include_ports=0
+    if [ "$choice" == "TODOS" ]; then
+        targets=("${systems[@]}")
+        [ -d "$ports_dir" ] && include_ports=1
+    elif [ "$choice" == "ports" ]; then
+        include_ports=1
+    else
+        targets=("$choice")
+    fi
 
+    # Calcula espaço necessário
     local total_bytes=0
     for sys in "${targets[@]}"; do
         local b; b=$(du -sb "${ROMS_BASE_DIR}/${sys}" 2>/dev/null | cut -f1)
         total_bytes=$(( total_bytes + ${b:-0} ))
     done
+    if [ "$include_ports" -eq 1 ] && [ -d "$ports_dir" ]; then
+        local pb; pb=$(du -sb "$ports_dir" 2>/dev/null | cut -f1)
+        total_bytes=$(( total_bytes + ${pb:-0} ))
+    fi
 
     local free_bytes
     free_bytes=$(df -B1 "$chosen_mount" 2>/dev/null | tail -1 | awk '{print $4}')
@@ -498,9 +519,12 @@ em4_export_collection() {
         return
     fi
 
+    local ports_info=""
+    [ "$include_ports" -eq 1 ] && ports_info="\nInclui: ports/"
+
     local confirm
     confirm=$(DIALOG_YESNO "Exportar Colecao" \
-        "Sistema(s): ${choice}\nTamanho total: ${total_human}\nEspaco livre: ${free_human}\nDestino: ${chosen_mount}/\n\nDeseja copiar agora?\n(Pode demorar varios minutos)")
+        "Sistema(s): ${choice}${ports_info}\nTamanho total: ${total_human}\nEspaco livre: ${free_human}\nDestino: ${chosen_mount}/roms/\n\nDeseja copiar agora?\n(Pode demorar varios minutos)")
     [ "$confirm" -ne 0 ] && return
 
     # Conta total de arquivos para gauge
@@ -509,6 +533,10 @@ em4_export_collection() {
         local n; n=$(find "${ROMS_BASE_DIR}/${sys}" -type f 2>/dev/null | wc -l)
         total_files=$(( total_files + n ))
     done
+    if [ "$include_ports" -eq 1 ] && [ -d "$ports_dir" ]; then
+        local np; np=$(find "$ports_dir" -type f 2>/dev/null | wc -l)
+        total_files=$(( total_files + np ))
+    fi
 
     local copied_file="${EM_TMP_DIR}/export_copied"
     local errors_file="${EM_TMP_DIR}/export_errors"
@@ -517,11 +545,12 @@ em4_export_collection() {
 
     (
     local copied=0 errors=0 processed=0
+
+    # Copia sistemas normais
     for sys in "${targets[@]}"; do
         local src_dir="${ROMS_BASE_DIR}/${sys}"
         local dst_dir="${chosen_mount}/roms/${sys}"
         mkdir -p "$dst_dir" 2>/dev/null
-
         while IFS= read -r -d '' f; do
             ((processed++))
             [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
@@ -535,10 +564,29 @@ em4_export_collection() {
             fi
         done < <(find "$src_dir" -type f -print0 2>/dev/null)
     done
+
+    # Copia ports preservando estrutura de subpastas
+    if [ "$include_ports" -eq 1 ] && [ -d "$ports_dir" ]; then
+        local dst_ports="${chosen_mount}/roms/ports"
+        mkdir -p "$dst_ports" 2>/dev/null
+        while IFS= read -r -d '' f; do
+            ((processed++))
+            [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
+            local rel_path="${f#${ports_dir}/}"
+            local dst_file="${dst_ports}/${rel_path}"
+            mkdir -p "$(dirname "$dst_file")" 2>/dev/null
+            if cp "$f" "$dst_file" 2>/dev/null; then
+                ((copied++)); echo "$copied" > "$copied_file"
+            else
+                ((errors++)); echo "$errors" > "$errors_file"
+            fi
+        done < <(find "$ports_dir" -type f -print0 2>/dev/null)
+    fi
+
     sync 2>/dev/null
     ) | dialog --backtitle "$DIALOG_BACKTITLE" \
         --title "Exportar Colecao" \
-        --gauge "Copiando ROMs para o pendrive...\nIsso pode demorar varios minutos." 8 60 0 \
+        --gauge "Copiando para o pendrive...\nIsso pode demorar varios minutos." 8 60 0 \
         > "$CURR_TTY" 2> "$CURR_TTY"
 
     local copied errors
@@ -548,7 +596,7 @@ em4_export_collection() {
 
     local result="Exportacao concluida.\n\nArquivos copiados: ${copied}"
     [ "$errors" -gt 0 ] && result+="\nErros: ${errors}"
-    result+="\n\nDestino: ${chosen_mount}/roms/\n\nPode remover o pendrive com segurança."
+    result+="\n\nDestino: ${chosen_mount}/roms/\n\nPode remover o pendrive com seguranca."
     DIALOG_MSG "Exportar Colecao" "$result"
 }
 
@@ -588,20 +636,24 @@ em4_sync_with_usb() {
         "O que deseja sincronizar?" \
         "1" "Saves (device → pendrive)" \
         "2" "ROMs por sistema (device → pendrive)" \
-        "3" "Saves (pendrive → device)" \
-        "4" "ROMs por sistema (pendrive → device)")
+        "3" "Ports (device → pendrive)" \
+        "4" "Saves (pendrive → device)" \
+        "5" "ROMs por sistema (pendrive → device)" \
+        "6" "Ports (pendrive → device)")
     [ "$(NORM_RET $?)" == "VOLTAR" ] && return
 
     case "$sync_type" in
-        1|3) em4_sync_saves "$chosen_mount" "$sync_type" ;;
-        2|4) em4_sync_roms  "$chosen_mount" "$sync_type" ;;
+        1|4) em4_sync_saves "$chosen_mount" "$sync_type" ;;
+        2|5) em4_sync_roms  "$chosen_mount" "$sync_type" ;;
+        3)   em4_sync_ports "$chosen_mount" "device_to_usb" ;;
+        6)   em4_sync_ports "$chosen_mount" "usb_to_device" ;;
     esac
 }
 
 # Sincroniza saves entre device e pendrive
 em4_sync_saves() {
     local usb="$1"
-    local direction="$2"   # 1=device→usb  3=usb→device
+    local direction="$2"   # 1=device→usb  4=usb→device
 
     local usb_save_dir="${usb}/saves"
 
@@ -765,10 +817,167 @@ em4_sync_saves() {
     fi
 }
 
+# =============================================================================
+# Sincroniza a pasta ports entre device e pendrive
+# Ports são jogos nativos (ScummVM, DOOM, etc.) armazenados em /roms/ports/
+# e geralmente têm subpastas com dados do jogo — por isso usamos rsync-like
+# com cp -r preservando a estrutura de diretórios.
+# =============================================================================
+em4_sync_ports() {
+    local usb="$1"
+    local direction="$2"   # "device_to_usb" | "usb_to_device"
+
+    local ports_dir="${ROMS_BASE_DIR}/ports"
+    local usb_ports_dir="${usb}/ports"
+
+    if [ "$direction" = "device_to_usb" ]; then
+        # ── device → pendrive ──
+        if [ ! -d "$ports_dir" ]; then
+            DIALOG_MSG "Sincronizar Ports" \
+                "Pasta ports nao encontrada em:\n${ports_dir}"
+            return
+        fi
+
+        local total_files
+        total_files=$(find "$ports_dir" -type f 2>/dev/null | wc -l)
+
+        if [ "$total_files" -eq 0 ]; then
+            DIALOG_MSG "Sincronizar Ports" "Nenhum arquivo encontrado em:\n${ports_dir}"
+            return
+        fi
+
+        local ports_size
+        ports_size=$(em4_dir_size "$ports_dir")
+
+        local free_bytes
+        free_bytes=$(df -B1 "$usb" 2>/dev/null | tail -1 | awk '{print $4}')
+        free_bytes=${free_bytes:-0}
+        local free_human
+        free_human=$(em_human_size "$free_bytes")
+
+        local confirm
+        confirm=$(DIALOG_YESNO "Sincronizar Ports" \
+            "Pasta: ${ports_dir}\nArquivos: ${total_files}\nTamanho: ${ports_size}\nEspaco livre no pendrive: ${free_human}\n\nApenas arquivos novos ou mais recentes serao copiados.\nDestino: ${usb_ports_dir}/\n\nDeseja continuar?")
+        [ "$confirm" -ne 0 ] && return
+
+        mkdir -p "$usb_ports_dir" 2>/dev/null
+
+        local copied_file="${EM_TMP_DIR}/sync_ports_copied"
+        local skip_file="${EM_TMP_DIR}/sync_ports_skip"
+        local errors_file="${EM_TMP_DIR}/sync_ports_errors"
+        echo 0 > "$copied_file"; echo 0 > "$skip_file"; echo 0 > "$errors_file"
+        em_drain_tty_buffer
+
+        (
+        local processed=0 copied=0 skipped=0 errors=0
+        while IFS= read -r -d '' f; do
+            ((processed++))
+            [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
+
+            # Preserva estrutura de subpastas
+            local rel="${f#${ports_dir}/}"
+            local dst="${usb_ports_dir}/${rel}"
+            mkdir -p "$(dirname "$dst")" 2>/dev/null
+
+            if [ ! -e "$dst" ] || [ "$f" -nt "$dst" ]; then
+                if cp "$f" "$dst" 2>/dev/null; then
+                    ((copied++)); echo "$copied" > "$copied_file"
+                else
+                    ((errors++)); echo "$errors" > "$errors_file"
+                fi
+            else
+                ((skipped++)); echo "$skipped" > "$skip_file"
+            fi
+        done < <(find "$ports_dir" -type f -print0 2>/dev/null)
+        sync 2>/dev/null
+        ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+            --title "Sincronizar Ports" \
+            --gauge "Sincronizando ports para o pendrive...\n${ports_dir} → ${usb_ports_dir}" 8 60 0 \
+            > "$CURR_TTY" 2> "$CURR_TTY"
+
+        local copied skipped errors
+        copied=$(cat "$copied_file" 2>/dev/null || echo 0)
+        skipped=$(cat "$skip_file" 2>/dev/null || echo 0)
+        errors=$(cat "$errors_file" 2>/dev/null || echo 0)
+        rm -f "$copied_file" "$skip_file" "$errors_file"
+
+        local result="Sincronizacao de Ports concluida.\n\nArquivos copiados/atualizados: ${copied}\nJa atualizados (ignorados): ${skipped}"
+        [ "$errors" -gt 0 ] && result+="\nErros: ${errors}"
+        result+="\n\nDestino: ${usb_ports_dir}/"
+        DIALOG_MSG "Sincronizar Ports" "$result"
+
+    else
+        # ── pendrive → device ──
+        if [ ! -d "$usb_ports_dir" ]; then
+            DIALOG_MSG "Sincronizar Ports" \
+                "Nenhuma pasta 'ports/' encontrada no pendrive:\n${usb_ports_dir}\n\nFaca primeiro uma sincronizacao device → pendrive."
+            return
+        fi
+
+        local total_files
+        total_files=$(find "$usb_ports_dir" -type f 2>/dev/null | wc -l)
+
+        if [ "$total_files" -eq 0 ]; then
+            DIALOG_MSG "Sincronizar Ports" \
+                "Nenhum arquivo encontrado em:\n${usb_ports_dir}"
+            return
+        fi
+
+        local confirm
+        confirm=$(DIALOG_YESNO "Sincronizar Ports" \
+            "Arquivos encontrados no pendrive: ${total_files}\nDestino: ${ports_dir}/\n\nApenas arquivos novos ou mais recentes serao copiados.\nA estrutura de subpastas sera preservada.\n\nDeseja continuar?")
+        [ "$confirm" -ne 0 ] && return
+
+        mkdir -p "$ports_dir" 2>/dev/null
+
+        local copied_file="${EM_TMP_DIR}/sync_ports_copied"
+        local skip_file="${EM_TMP_DIR}/sync_ports_skip"
+        local errors_file="${EM_TMP_DIR}/sync_ports_errors"
+        echo 0 > "$copied_file"; echo 0 > "$skip_file"; echo 0 > "$errors_file"
+        em_drain_tty_buffer
+
+        (
+        local processed=0 copied=0 skipped=0 errors=0
+        while IFS= read -r -d '' f; do
+            ((processed++))
+            [ "$total_files" -gt 0 ] && echo $(( processed * 100 / total_files ))
+
+            local rel="${f#${usb_ports_dir}/}"
+            local dst="${ports_dir}/${rel}"
+            mkdir -p "$(dirname "$dst")" 2>/dev/null
+
+            if [ ! -e "$dst" ] || [ "$f" -nt "$dst" ]; then
+                if cp "$f" "$dst" 2>/dev/null; then
+                    ((copied++)); echo "$copied" > "$copied_file"
+                else
+                    ((errors++)); echo "$errors" > "$errors_file"
+                fi
+            else
+                ((skipped++)); echo "$skipped" > "$skip_file"
+            fi
+        done < <(find "$usb_ports_dir" -type f -print0 2>/dev/null)
+        ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+            --title "Sincronizar Ports" \
+            --gauge "Sincronizando ports do pendrive para o device..." 8 60 0 \
+            > "$CURR_TTY" 2> "$CURR_TTY"
+
+        local copied skipped errors
+        copied=$(cat "$copied_file" 2>/dev/null || echo 0)
+        skipped=$(cat "$skip_file" 2>/dev/null || echo 0)
+        errors=$(cat "$errors_file" 2>/dev/null || echo 0)
+        rm -f "$copied_file" "$skip_file" "$errors_file"
+
+        local result="Sincronizacao de Ports concluida.\n\nArquivos copiados/atualizados: ${copied}\nJa atualizados (ignorados): ${skipped}"
+        [ "$errors" -gt 0 ] && result+="\nErros: ${errors}"
+        result+="\n\nDestino: ${ports_dir}/"
+        DIALOG_MSG "Sincronizar Ports" "$result"
+    fi
+}
+
 # Sincroniza ROMs entre device e pendrive
 em4_sync_roms() {
     local usb="$1"
-    local direction="$2"   # 2=device→usb  4=usb→device
+    local direction="$2"   # 2=device→usb  5=usb→device
 
     local systems
     mapfile -t systems < <(em_list_existing_systems)
