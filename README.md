@@ -4,9 +4,16 @@ Ferramenta modular de gerenciamento de emuladores e ROMs para handhelds retro, c
 
 ---
 
-## Versão atual: 6.2.0
+## Versão atual: 6.3.0
 
 ### Changelog
+
+#### v6.3.0
+- **[cat_1]** Nova opção 9: Auditoria contra banco .dat — classifica cada ROM em 3 grupos (✓ nome correto / ≠ nome errado / ? sem correspondência) via CRC32, com opção de renomear o grupo errado direto na tela
+- **[cat_4]** Nova opção de sincronização: Ports (device↔pendrive), preservando estrutura completa de subpastas
+- **[cat_4]** Exportar coleção para pendrive agora inclui a pasta `ports/` no menu e na opção TODOS
+- **[cat_2]** `em2_check_wrong_system` reescrita: eliminado `find` recursivo que travava o device; agora usa `maxdepth 1` por sistema + raiz de `/roms`; dois grupos separados na prévia (movíveis vs sem pasta destino)
+- **[cat_2]** `em2_export_list` expandida: 3 formatos (TXT, CSV, CSV com CRC32) e escopo configurável (raiz ou raiz + subpastas)
 
 #### v6.2.0
 - **[cat_1]** Detecção de duplicatas separada em sub-menu com duas modalidades:
