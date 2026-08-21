@@ -1531,6 +1531,277 @@ em_show_collection_stats() {
 }
 
 # -----------------------------------------------------------------------------
+# 9. AUDITORIA DE ROMS CONTRA BANCO .dat
+#
+# Cruza cada ROM do sistema com o índice CRC32 do .dat No-Intro e classifica
+# em três grupos:
+#
+#   ✓ CORRETAS     — CRC32 bate E nome já está igual ao canônico
+#   ≠ NOME ERRADO  — CRC32 bate MAS nome atual é diferente do canônico
+#   ? SEM MATCH    — CRC32 não encontrado no .dat (dump desconhecido ou hacked)
+#
+# Após a análise, oferece renomear o grupo "NOME ERRADO" direto
+# (aproveita a mesma lógica de em_rename_database).
+# Relatório completo salvo em data/audit_report.txt.
+# -----------------------------------------------------------------------------
+em_audit_roms() {
+    if ! em_has_tool python3; then
+        DIALOG_MSG "Auditoria .dat" "python3 nao encontrado.\n\nEsta funcao requer python3 para calcular CRC32."
+        return
+    fi
+
+    local systems
+    mapfile -t systems < <(em_list_existing_systems)
+    if [ ${#systems[@]} -eq 0 ]; then
+        DIALOG_MSG "Auditoria .dat" "Nenhum diretorio de sistema encontrado em ${ROMS_BASE_DIR}."
+        return
+    fi
+
+    local menu_items=()
+    local sys
+    for sys in "${systems[@]}"; do
+        menu_items+=("$sys" "$sys")
+    done
+
+    local chosen_sys
+    chosen_sys=$(DIALOG_MENU "Auditoria .dat" \
+        "Escolha o sistema para auditar:" "${menu_items[@]}")
+    [ "$(NORM_RET $?)" == "VOLTAR" ] && return
+
+    local dats_dir="${EM_DATA_DIR}/dats"
+    mkdir -p "$dats_dir"
+
+    # Detecta .dat automaticamente (mesmo sistema de em_rename_database)
+    local auto_dat=""
+    local f
+    while IFS= read -r -d '' f; do
+        local fname_lower
+        fname_lower="$(basename "$f" | tr '[:upper:]' '[:lower:]')"
+        if em_dat_matches_system "$fname_lower" "$chosen_sys"; then
+            auto_dat="$f"
+            break
+        fi
+    done < <(find "$dats_dir" -maxdepth 1 -name "*.dat" -print0 2>/dev/null)
+
+    if [ -z "$auto_dat" ]; then
+        DIALOG_MSG "Arquivo .dat nao encontrado" \
+            "Nenhum arquivo .dat encontrado para '${chosen_sys}'.\n\nColoque o arquivo .dat No-Intro em:\n  ${dats_dir}/\n\nO mesmo arquivo usado para renomear (opcao 3) funciona aqui."
+        return
+    fi
+
+    # Constrói ou reutiliza índice CRC32→nome
+    local index_file="${dats_dir}/${chosen_sys}_crc_index.tsv"
+    local needs_rebuild=0
+    [ ! -f "$index_file" ]              && needs_rebuild=1
+    [ "$auto_dat" -nt "$index_file" ]   && needs_rebuild=1
+    [ ! -s "$index_file" ]              && needs_rebuild=1
+    if [ "$needs_rebuild" -eq 0 ]; then
+        local lc; lc=$(wc -l < "$index_file" 2>/dev/null || echo 0)
+        [ "$lc" -lt 10 ] && needs_rebuild=1
+    fi
+
+    if [ "$needs_rebuild" -eq 1 ]; then
+        rm -f "$index_file"
+        DIALOG_MSG "Indexando .dat" "Processando o arquivo .dat...\nIsso leva alguns segundos na primeira vez."
+        local entry_count
+        entry_count=$(em_dat_build_index "$auto_dat" "$index_file")
+        if [ $? -ne 0 ] || [ ! -s "$index_file" ]; then
+            DIALOG_MSG "Erro" "Nao foi possivel processar o arquivo .dat:\n${auto_dat}"
+            rm -f "$index_file"
+            return
+        fi
+        chown ark:ark "$index_file" 2>/dev/null || true
+    fi
+
+    # Conta ROMs para gauge
+    local rom_dir="${ROMS_BASE_DIR}/${chosen_sys}"
+    local total_roms=0
+    while IFS= read -r -d '' f; do
+        local ext="${f##*.}"
+        em_is_rom_extension "$ext" && ((total_roms++))
+    done < <(find "$rom_dir" -maxdepth 1 -type f -print0 2>/dev/null)
+
+    if [ "$total_roms" -eq 0 ]; then
+        DIALOG_MSG "Auditoria .dat" "Nenhuma ROM encontrada em:\n${rom_dir}"
+        return
+    fi
+
+    # Arquivos temporários para os 3 grupos
+    local correct_file="${EM_TMP_DIR}/audit_correct.txt"
+    local wrong_name_file="${EM_TMP_DIR}/audit_wrong_name.tsv"  # caminho TAB nome_canonico
+    local no_match_file="${EM_TMP_DIR}/audit_no_match.txt"
+    local cancel_file="${EM_TMP_DIR}/audit_cancelled"
+    local processed_file="${EM_TMP_DIR}/audit_processed"
+
+    > "$correct_file"; > "$wrong_name_file"; > "$no_match_file"
+    rm -f "$cancel_file"
+    echo 0 > "$processed_file"
+    em_drain_tty_buffer
+
+    (
+    local processed=0
+    while IFS= read -r -d '' f; do
+        local ext="${f##*.}"
+        em_is_rom_extension "$ext" || continue
+
+        if em_check_cancel_key; then
+            echo "1" > "$cancel_file"; exit 0
+        fi
+
+        ((processed++))
+        echo "$processed" > "$processed_file"
+        echo $(( processed * 100 / total_roms ))
+
+        local crc
+        crc=$(em_calc_rom_crc32 "$f")
+
+        if [ -z "$crc" ]; then
+            echo "$f" >> "$no_match_file"
+            continue
+        fi
+
+        local canonical
+        canonical=$(grep -m1 "^${crc}"$'\t' "$index_file" 2>/dev/null | cut -f2)
+
+        if [ -z "$canonical" ]; then
+            # CRC não encontrado no .dat
+            echo "$f" >> "$no_match_file"
+        else
+            local current_name
+            current_name=$(basename "${f%.*}")
+            if [ "$current_name" = "$canonical" ]; then
+                # Nome já correto
+                echo "$f" >> "$correct_file"
+            else
+                # CRC bate mas nome está errado
+                printf '%s\t%s\n' "$f" "$canonical" >> "$wrong_name_file"
+            fi
+        fi
+    done < <(find "$rom_dir" -maxdepth 1 -type f -print0 2>/dev/null)
+    ) | DIALOG_GAUGE_CANCELABLE "Auditoria .dat" \
+        "Calculando CRC32 e cruzando com o banco de dados...\n\n(Aperte B/VOLTAR para cancelar)"
+
+    local processed
+    processed=$(cat "$processed_file" 2>/dev/null || echo 0)
+    rm -f "$processed_file"
+
+    if [ -f "$cancel_file" ]; then
+        rm -f "$cancel_file" "$correct_file" "$wrong_name_file" "$no_match_file"
+        DIALOG_MSG "Auditoria Cancelada" \
+            "Verificacao interrompida.\n\nROMs verificadas: ${processed}"
+        return
+    fi
+
+    # Contadores finais
+    local correct_count=0 wrong_count=0 nomatch_count=0
+    [ -s "$correct_file" ]    && correct_count=$(wc -l < "$correct_file")
+    [ -s "$wrong_name_file" ] && wrong_count=$(wc -l < "$wrong_name_file")
+    [ -s "$no_match_file" ]   && nomatch_count=$(wc -l < "$no_match_file")
+
+    # Gera relatório
+    local report="${EM_DATA_DIR}/audit_report.txt"
+    {
+        echo "Auditoria No-Intro - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Sistema: ${chosen_sys} | DAT: $(basename "$auto_dat")"
+        echo "ROMs verificadas: ${total_roms}"
+        echo "=========================================="
+        echo ""
+        echo "✓ CORRETAS (${correct_count})"
+        [ -s "$correct_file" ] && while IFS= read -r fp; do
+            echo "  $(basename "$fp")"
+        done < "$correct_file"
+        echo ""
+        echo "≠ NOME ERRADO (${wrong_count})"
+        [ -s "$wrong_name_file" ] && while IFS=$'\t' read -r fp can; do
+            echo "  ATUAL : $(basename "${fp%.*}")"
+            echo "  CORRETO: ${can}"
+            echo ""
+        done < "$wrong_name_file"
+        echo "? SEM CORRESPONDENCIA NO .dat (${nomatch_count})"
+        [ -s "$no_match_file" ] && while IFS= read -r fp; do
+            echo "  $(basename "$fp")"
+        done < "$no_match_file"
+    } > "$report"
+    chown ark:ark "$report" 2>/dev/null || true
+
+    # Prévia do grupo "nome errado"
+    local wrong_preview=""
+    if [ "$wrong_count" -gt 0 ]; then
+        local shown=0
+        while IFS=$'\t' read -r fp canonical; do
+            local cur; cur=$(basename "${fp%.*}")
+            wrong_preview+="DE:   ${cur}\nPARA: ${canonical}\n\n"
+            ((shown++))
+            [ "$shown" -ge 8 ] && break
+        done < "$wrong_name_file"
+        [ "$wrong_count" -gt 8 ] && \
+            wrong_preview+="... e mais $(( wrong_count - 8 )) arquivo(s).\n"
+    fi
+
+    # Exibe resultado resumido
+    local summary="Sistema: ${chosen_sys}\nDAT: $(basename "$auto_dat")\n"
+    summary+="ROMs verificadas: ${total_roms}\n\n"
+    summary+="✓ Nome correto:       ${correct_count}\n"
+    summary+="≠ Nome errado:        ${wrong_count}\n"
+    summary+="? Sem correspondencia: ${nomatch_count}\n"
+    summary+="\nRelatorio completo:\n${report}"
+
+    if [ "$wrong_count" -eq 0 ]; then
+        # Nada para renomear
+        DIALOG_MSG "Auditoria Concluida" "$summary"
+        rm -f "$correct_file" "$wrong_name_file" "$no_match_file"
+        return
+    fi
+
+    # Oferece renomear o grupo "nome errado"
+    local confirm
+    confirm=$(DIALOG_YESNO "Auditoria Concluida" \
+        "${summary}\n\nROMs com nome errado:\n\n${wrong_preview}Deseja renomear as ${wrong_count} ROM(s) para o nome No-Intro correto agora?")
+
+    if [ "$confirm" -ne 0 ]; then
+        DIALOG_MSG "Auditoria" \
+            "Nenhuma alteracao foi feita.\n\nRelatorio salvo em:\n${report}"
+        rm -f "$correct_file" "$wrong_name_file" "$no_match_file"
+        return
+    fi
+
+    # Executa renomeações do grupo "nome errado"
+    local renamed=0 rename_errors=0
+    {
+        echo ""
+        echo "-- RENOMEACOES APLICADAS --"
+    } >> "$report"
+
+    while IFS=$'\t' read -r filepath canonical; do
+        local dir ext new_path
+        dir=$(dirname "$filepath")
+        ext="${filepath##*.}"
+        new_path="${dir}/${canonical}.${ext}"
+
+        if [ -e "$new_path" ] && [ "$new_path" != "$filepath" ]; then
+            echo "[CONFLITO] $(basename "$filepath") → ${canonical}.${ext}" >> "$report"
+            ((rename_errors++))
+        elif mv -- "$filepath" "$new_path" 2>/dev/null; then
+            echo "[OK] $(basename "$filepath") → ${canonical}.${ext}" >> "$report"
+            ((renamed++))
+        else
+            echo "[ERRO] $(basename "$filepath")" >> "$report"
+            ((rename_errors++))
+        fi
+    done < "$wrong_name_file"
+
+    rm -f "$correct_file" "$wrong_name_file" "$no_match_file"
+    chown ark:ark "$report" 2>/dev/null || true
+
+    local result="Renomeacao concluida.\n\n"
+    result+="Renomeadas: ${renamed}\n"
+    [ "$rename_errors" -gt 0 ] && result+="Erros/conflitos: ${rename_errors}\n"
+    result+="Sem correspondencia (nao alteradas): ${nomatch_count}\n"
+    result+="\nRelatorio salvo em:\n${report}"
+    DIALOG_MSG "Auditoria - Concluida" "$result"
+}
+
+# -----------------------------------------------------------------------------
 # MENU PRINCIPAL DO MODULO
 # -----------------------------------------------------------------------------
 categoria_1() {
@@ -1547,6 +1818,7 @@ categoria_1() {
             "6" "Detectar Duplicadas" \
             "7" "Tamanho Total por Sistema" \
             "8" "Estatisticas da Colecao" \
+            "9" "Auditoria contra banco .dat" \
             "0" "VOLTAR")
 
         local ret=$?
@@ -1563,6 +1835,7 @@ categoria_1() {
             6) em_duplicates_menu ;;
             7) em_show_size_per_system ;;
             8) em_show_collection_stats ;;
+            9) em_audit_roms ;;
             0) return ;;
         esac
     done
